@@ -1,0 +1,528 @@
+# ZVV / VBZ departure board for ESPHome
+#
+# Hardware: ESP32 MH-ET Live MiniKit (WROOM-32, *not* WROVER) on hallard's
+# WeMos-Matrix-Shield-DMA V1.9, one 128x64 HUB75 panel (1/32 scan), BH1750 (GY-302) in J1.
+#
+# Port of https://github.com/sschueller/vbz-fahrgastinformation (MIT). Departures come from
+# https://transport.opendata.ch (the original TRIAS 2020 endpoint has been shut down).
+
+substitutions:
+  name: zvv-schedule
+  friendly_name: ZVV Schedule
+  ap_password: !secret ap_password
+
+  # HUB75 colour data pins as labelled on the shield (HUB75 pins 1,2,3,5,6,7).
+  # If the "Test pattern" switch shows the bars in the wrong colours, replace these six
+  # with the rotated mapping the original firmware used for its panel:
+  #   r1_pin: GPIO26  g1_pin: GPIO27  b1_pin: GPIO25
+  #   r2_pin: GPIO12  g2_pin: GPIO13  b2_pin: GPIO14
+  r1_pin: GPIO25
+  g1_pin: GPIO26
+  b1_pin: GPIO27
+  r2_pin: GPIO14
+  g2_pin: GPIO12
+  b2_pin: GPIO13
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2025.12.0
+  includes:
+    - includes/departures.h
+  on_boot:
+    - priority: -100
+      then:
+        - script.execute: apply_brightness
+
+esp32:
+  board: mhetesp32minikit
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    encryption: {} # reuses the api encryption key
+
+web_server:
+  version: 3
+  ota: false # firmware uploads only via encrypted OTA (or the fallback AP's captive portal)
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: ${name}
+    password: ${ap_password}
+  on_connect:
+    - script.execute: fetch_departures
+
+captive_portal:
+
+debug:
+  update_interval: 30s
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Zurich
+    servers:
+      - 0.ch.pool.ntp.org
+      - 1.ch.pool.ntp.org
+      - 2.ch.pool.ntp.org
+    on_time_sync:
+      - script.execute: fetch_departures
+      - script.execute: apply_brightness
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+
+http_request:
+  useragent: zvv-schedule-esphome
+  timeout: 5s
+
+font:
+  - id: vbz
+    file: fonts/vbzfont.bdf
+    glyphs:
+      - " !'()*+,-./0123456789:<>?"
+      - "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      - "`abcdefghijklmnopqrstuvwxyzäöü"
+      - ""
+
+globals:
+  - id: target_brightness
+    type: int
+    initial_value: "64"
+  - id: applied_brightness
+    type: int
+    initial_value: "64"
+
+display:
+  - platform: hub75
+    id: matrix
+    panel_width: 128
+    panel_height: 64
+    r1_pin: ${r1_pin}
+    g1_pin: ${g1_pin}
+    b1_pin: ${b1_pin}
+    r2_pin: ${r2_pin}
+    g2_pin: ${g2_pin}
+    b2_pin: ${b2_pin}
+    a_pin: GPIO23
+    b_pin: GPIO19
+    c_pin:
+      number: GPIO5
+      ignore_strapping_warning: true
+    d_pin: GPIO17
+    e_pin: GPIO18 # via jumper JP1, must be bridged to HUB75 pin 8 for 1/32-scan panels
+    lat_pin: GPIO4
+    oe_pin:
+      number: GPIO15
+      ignore_strapping_warning: true
+    clk_pin: GPIO16
+    shift_driver: GENERIC # try FM6126A if the panel stays dark
+    clock_speed: 20MHZ # lower to 10MHZ on ghosting / unstable pixels
+    bit_depth: 8
+    brightness: 64
+    double_buffer: false
+    # Content changes at most once per second and is only redrawn when it changes
+    # (see the signature check below), so drive updates from an interval and keep the
+    # panel refresh rate independent of it.
+    update_interval: never
+    min_refresh_rate: 100
+    auto_clear_enabled: false
+    lambda: |-
+      static std::string last_sig;
+      auto *font = id(vbz);
+      auto *wifi = wifi::global_wifi_component;
+      const auto now = id(sntp_time).now();
+      const auto &b = zvv::board();
+
+      enum class Mode { TEST, SPLASH, AP, CONNECTING, ERROR, LOADING, EMPTY, BOARD } mode;
+      std::vector<zvv::Row> rows;
+      bool stale = false;
+      std::string sig;
+
+      if (id(test_pattern).state) {
+        mode = Mode::TEST; sig = "test";
+      } else if (millis() < 4000) {
+        mode = Mode::SPLASH; sig = "splash";
+      } else if (!wifi->is_connected() && wifi->is_ap_active()) {
+        mode = Mode::AP; sig = "ap";
+      } else if (!wifi->is_connected() || !now.is_valid()) {
+        mode = Mode::CONNECTING; sig = "connecting";
+      } else {
+        rows = zvv::visible_rows(now.timestamp);
+        stale = b.last_ok_ts > 0 && (now.timestamp - b.last_ok_ts) > 300;
+        if (!rows.empty()) {
+          mode = Mode::BOARD; sig = zvv::board_signature(rows, stale);
+        } else if (!b.last_error.empty()) {
+          mode = Mode::ERROR; sig = "error|" + b.last_error;
+        } else if (b.last_ok_ts == 0) {
+          mode = Mode::LOADING; sig = "loading|" + id(ip_address).state;
+        } else {
+          mode = Mode::EMPTY; sig = "empty";
+        }
+      }
+
+      if (sig == last_sig)
+        return;  // nothing changed, keep the current frame (avoids clear/redraw flicker)
+      last_sig = sig;
+
+      it.fill(Color::BLACK);
+      switch (mode) {
+        case Mode::TEST:
+          zvv::draw_test_pattern(it, font);
+          break;
+        case Mode::SPLASH:
+          zvv::draw_splash(it, font);
+          break;
+        case Mode::AP:
+          zvv::draw_message(it, font, "connect to:\n${name}\npwd: ${ap_password}\n192.168.4.1", Color(255, 255, 255));
+          break;
+        case Mode::CONNECTING:
+          zvv::draw_message(it, font, "connecting...", Color(255, 255, 255));
+          break;
+        case Mode::ERROR:
+          zvv::draw_message(it, font, b.last_error, zvv::error_color());
+          break;
+        case Mode::LOADING:
+          zvv::draw_message(it, font, "loading...\n" + id(ip_address).state, Color(255, 255, 255));
+          break;
+        case Mode::EMPTY:
+          zvv::draw_message(it, font, "keine Abfahrten", Color(255, 255, 255));
+          break;
+        case Mode::BOARD:
+          zvv::draw_board(it, font, rows, stale);
+          break;
+      }
+
+interval:
+  - interval: 1s
+    then:
+      - component.update: matrix
+  # transport.opendata.ch refreshes realtime data every 30 s; polling faster gets throttled.
+  - interval: 30s
+    then:
+      - script.execute: fetch_departures
+  # Re-evaluate the night schedule.
+  - interval: 60s
+    then:
+      - script.execute: apply_brightness
+
+script:
+  - id: fetch_departures
+    mode: single
+    then:
+      - if:
+          condition:
+            and:
+              - wifi.connected:
+              - lambda: return id(sntp_time).now().is_valid();
+          then:
+            - http_request.get:
+                url: !lambda return zvv::stationboard_url(id(station_id).state, 15);
+                capture_response: true
+                max_response_buffer_size: 8kB
+                on_response:
+                  then:
+                    - lambda: |-
+                        auto &b = zvv::board();
+                        if (response->status_code != 200) {
+                          b.last_error = "API error: HTTP " + std::to_string(response->status_code);
+                          ESP_LOGW("zvv", "stationboard returned HTTP %d", response->status_code);
+                        } else {
+                          const int64_t now = id(sntp_time).now().timestamp;
+                          const std::string filter = id(platform_filter).state;
+                          const bool ok = json::parse_json(body, [now, &filter](JsonObject root) -> bool {
+                            return zvv::parse_stationboard(root, filter, now);
+                          });
+                          if (!ok && b.last_error.empty())
+                            b.last_error = "API error: invalid JSON";
+                          if (ok)
+                            ESP_LOGD("zvv", "%u departures loaded", (unsigned) b.departures.size());
+                        }
+                        id(last_error).publish_state(b.last_error.empty() ? "OK" : b.last_error);
+                        if (b.last_error.empty())
+                          id(last_update).publish_state(id(sntp_time).now().strftime("%H:%M:%S"));
+                on_error:
+                  then:
+                    - lambda: |-
+                        zvv::board().last_error = "No connection to transport.opendata.ch";
+                        id(last_error).publish_state(zvv::board().last_error);
+
+  - id: apply_brightness
+    mode: queued
+    max_runs: 2
+    then:
+      - lambda: |-
+          const auto now = id(sntp_time).now();
+          bool night = false;
+          if (id(night_schedule).state && now.is_valid()) {
+            night = zvv::in_window(now.hour * 60 + now.minute,
+                                   id(night_start).hour * 60 + id(night_start).minute,
+                                   id(night_end).hour * 60 + id(night_end).minute);
+          }
+          int target;
+          if (night) {
+            target = 0;
+          } else if (!id(auto_brightness).state) {
+            target = (int) id(manual_brightness).state;
+          } else {
+            target = zvv::compute_brightness(id(lux).state, id(brightness_min).state, id(brightness_max).state,
+                                             id(lux_low).state, id(lux_high).state, id(brightness_gamma).state);
+          }
+          id(target_brightness) = target;
+      # Every set_brightness() rewrites all DMA buffers, so skip tiny changes.
+      - if:
+          condition:
+            lambda: |-
+              const int t = id(target_brightness), a = id(applied_brightness);
+              return std::abs(t - a) >= 2 || ((t == 0) != (a == 0)) || (t != a && (t == 255 || t <= 2));
+          then:
+            - hub75.set_brightness:
+                id: matrix
+                brightness: !lambda return id(target_brightness);
+            - lambda: |-
+                id(applied_brightness) = id(target_brightness);
+                id(display_brightness).publish_state(id(applied_brightness));
+
+sensor:
+  - platform: bh1750
+    id: lux
+    name: Illuminance (raw)
+    internal: true
+    address: 0x23
+    update_interval: 2s
+    filters:
+      - sliding_window_moving_average:
+          window_size: 5
+          send_every: 1
+    on_value:
+      - script.execute: apply_brightness
+
+  # Throttled copy for Home Assistant (the internal sensor updates every 2 s).
+  - platform: copy
+    source_id: lux
+    name: Illuminance
+    filters:
+      - throttle: 30s
+
+  - platform: template
+    id: display_brightness
+    name: Display brightness
+    icon: mdi:brightness-6
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: debug
+    free:
+      name: Heap free
+    block:
+      name: Heap max block
+    loop_time:
+      name: Loop time
+
+  - platform: wifi_signal
+    name: WiFi signal
+    update_interval: 60s
+
+text_sensor:
+  - platform: template
+    id: last_update
+    name: Last update
+    icon: mdi:clock-check-outline
+    entity_category: diagnostic
+
+  - platform: template
+    id: last_error
+    name: Last error
+    icon: mdi:alert-circle-outline
+    entity_category: diagnostic
+
+  - platform: wifi_info
+    ip_address:
+      id: ip_address
+      name: IP address
+
+text:
+  - platform: template
+    id: station_id
+    name: Station ID
+    icon: mdi:bus-stop
+    mode: text
+    optimistic: true
+    restore_value: true
+    initial_value: "8576193" # Zürich, Bellevue
+    min_length: 1
+    max_length: 10
+    entity_category: config
+    on_value:
+      - lambda: |-
+          zvv::board().departures.clear();
+          zvv::board().last_ok_ts = 0;
+          zvv::board().last_error.clear();
+      - script.execute: fetch_departures
+
+  - platform: template
+    id: platform_filter
+    name: Platform filter
+    icon: mdi:filter-variant
+    mode: text
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    max_length: 32
+    entity_category: config
+    on_value:
+      - script.execute: fetch_departures
+
+number:
+  - platform: template
+    id: brightness_min
+    name: Brightness min
+    icon: mdi:brightness-4
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 12
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - script.execute: apply_brightness
+
+  - platform: template
+    id: brightness_max
+    name: Brightness max
+    icon: mdi:brightness-7
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 255
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - script.execute: apply_brightness
+
+  - platform: template
+    id: lux_low
+    name: Lux at min brightness
+    icon: mdi:weather-night
+    unit_of_measurement: lx
+    mode: box
+    min_value: 0
+    max_value: 1000
+    step: 1
+    initial_value: 1
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - script.execute: apply_brightness
+
+  - platform: template
+    id: lux_high
+    name: Lux at max brightness
+    icon: mdi:weather-sunny
+    unit_of_measurement: lx
+    mode: box
+    min_value: 1
+    max_value: 65000
+    step: 1
+    initial_value: 500
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - script.execute: apply_brightness
+
+  - platform: template
+    id: brightness_gamma
+    name: Brightness curve
+    icon: mdi:chart-bell-curve-cumulative
+    min_value: 0.3
+    max_value: 3.0
+    step: 0.1
+    initial_value: 1.0
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      - script.execute: apply_brightness
+
+  - platform: template
+    id: manual_brightness
+    name: Manual brightness
+    icon: mdi:brightness-percent
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 128
+    optimistic: true
+    restore_value: true
+    on_value:
+      - script.execute: apply_brightness
+
+switch:
+  - platform: template
+    id: auto_brightness
+    name: Auto brightness
+    icon: mdi:brightness-auto
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_state:
+      - script.execute: apply_brightness
+
+  - platform: template
+    id: night_schedule
+    name: Night schedule
+    icon: mdi:sleep
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_state:
+      - script.execute: apply_brightness
+
+  - platform: template
+    id: test_pattern
+    name: Test pattern
+    icon: mdi:test-tube
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    entity_category: diagnostic
+
+datetime:
+  - platform: template
+    id: night_start
+    name: Night start
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "23:00:00"
+    entity_category: config
+    on_value:
+      - script.execute: apply_brightness
+
+  - platform: template
+    id: night_end
+    name: Night end
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "06:00:00"
+    entity_category: config
+    on_value:
+      - script.execute: apply_brightness
+
+button:
+  - platform: restart
+    name: Restart

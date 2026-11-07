@@ -1,0 +1,9 @@
+{
+  "yaml.customTags": [
+    "!secret scalar",
+    "!lambda scalar",
+    "!include scalar",
+    "!extend scalar",
+    "!remove scalar"
+  ]
+}
