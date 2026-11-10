@@ -102,7 +102,8 @@ Each brightness change rewrites the DMA buffers (about 1–2 ms), so changes sma
 - **Wrong colours in the test pattern:** use the rotated pin set commented in `substitutions:`. The original firmware needed it for its panel.
 - **Panel stays dark or shows garbage:** try `shift_driver: FM6126A`, then `clock_speed: 10MHZ`.
 - **Flicker or ghosting:** lower `clock_speed`, or try `min_refresh_rate` 60–120.
-- **Low heap or random resets:** check *Heap free* (it should stay above about 40 KB). Lower `bit_depth` to 6 if needed. `double_buffer` is off on purpose: the frame is redrawn only when its content changes, so there is no visible clear/redraw.
+- **Low heap or random resets:** check *Heap free* (it should stay above about 40 KB). Lower `bit_depth` to 6 if needed. `double_buffer` is off on purpose: one panel buffer is 64 KB of DMA RAM, and a second one doesn't fit next to Wi-Fi. Each frame is drawn into a 16 KB off-screen canvas instead and copied to the panel in one pass, so redraws don't blink.
+- **Panel still blinks:** every redraw logs `[zvv] redraw` at DEBUG level. If a blink doesn't line up with one of those lines, it isn't the drawing. Check the 5 V supply and C1 (Wi-Fi transmit bursts can make a weak supply sag).
 - **Boxes instead of letters:** a character is missing from the font. Add a mapping to `font_safe()` in `includes/departures.h`, or draw the glyph in `tools/gfx2bdf.py` (`EXTRA`) and regenerate the font.
 
 ## Files
@@ -111,6 +112,7 @@ Each brightness change rewrites the DMA buffers (about 1–2 ms), so changes sma
 |---|---|
 | `zvv-schedule.yaml` | ESPHome configuration |
 | `includes/departures.h` | Parsing, layout, VBZ colours, brightness curve (C++) |
+| `includes/canvas.h` | Off-screen frame that is copied to the panel in one pass (no blink on redraw) |
 | `fonts/vbzfont.bdf` | VBZ font converted to BDF (generated) |
 | `fonts/upstream/vbzfont.h` | Original Adafruit-GFX font from the upstream project |
 | `tools/gfx2bdf.py` | Converter. Run `python3 tools/gfx2bdf.py fonts/upstream/vbzfont.h fonts/vbzfont.bdf --preview` |

@@ -29,6 +29,7 @@ esphome:
   min_version: 2025.12.0
   includes:
     - includes/departures.h
+    - includes/canvas.h
   on_boot:
     - priority: -100
       then:
@@ -132,6 +133,8 @@ display:
     clock_speed: 20MHZ # lower to 10MHZ on ghosting / unstable pixels
     bit_depth: 8
     brightness: 64
+    # A second 64 KB DMA buffer doesn't fit next to Wi-Fi. Frames are drawn off-screen
+    # instead (includes/canvas.h) and copied in one pass, so redraws don't blink.
     double_buffer: false
     # Content changes at most once per second and is only redrawn when it changes
     # (see the signature check below), so drive updates from an interval and keep the
@@ -141,6 +144,7 @@ display:
     auto_clear_enabled: false
     lambda: |-
       static std::string last_sig;
+      static zvv::Canvas canvas;  // off-screen frame, copied to the panel in one pass
       auto *font = id(vbz);
       auto *wifi = wifi::global_wifi_component;
       const auto now = id(sntp_time).now();
@@ -174,36 +178,40 @@ display:
       }
 
       if (sig == last_sig)
-        return;  // nothing changed, keep the current frame (avoids clear/redraw flicker)
+        return;  // nothing changed, keep the current frame
       last_sig = sig;
+      ESP_LOGD("zvv", "redraw");
 
-      it.fill(Color::BLACK);
+      // Draw off-screen, then copy: the panel never shows a cleared or half-drawn frame.
+      auto &c = canvas;
+      c.fill(Color::BLACK);
       switch (mode) {
         case Mode::TEST:
-          zvv::draw_test_pattern(it, font);
+          zvv::draw_test_pattern(c, font);
           break;
         case Mode::SPLASH:
-          zvv::draw_splash(it, font);
+          zvv::draw_splash(c, font);
           break;
         case Mode::AP:
-          zvv::draw_message(it, font, "connect to:\n${name}\npwd: ${ap_password}\n192.168.4.1", Color(255, 255, 255));
+          zvv::draw_message(c, font, "connect to:\n${name}\npwd: ${ap_password}\n192.168.4.1", Color(255, 255, 255));
           break;
         case Mode::CONNECTING:
-          zvv::draw_message(it, font, "connecting...", Color(255, 255, 255));
+          zvv::draw_message(c, font, "connecting...", Color(255, 255, 255));
           break;
         case Mode::ERROR:
-          zvv::draw_message(it, font, b.last_error, zvv::error_color());
+          zvv::draw_message(c, font, b.last_error, zvv::error_color());
           break;
         case Mode::LOADING:
-          zvv::draw_message(it, font, "loading...\n" + id(ip_address).state, Color(255, 255, 255));
+          zvv::draw_message(c, font, "loading...\n" + id(ip_address).state, Color(255, 255, 255));
           break;
         case Mode::EMPTY:
-          zvv::draw_message(it, font, "keine Abfahrten", Color(255, 255, 255));
+          zvv::draw_message(c, font, "keine Abfahrten", Color(255, 255, 255));
           break;
         case Mode::BOARD:
-          zvv::draw_board(it, font, rows, stale);
+          zvv::draw_board(c, font, rows, stale);
           break;
       }
+      c.present(it);
 
 interval:
   - interval: 1s
