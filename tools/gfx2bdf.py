@@ -15,9 +15,15 @@ Output metrics: FONT_ASCENT 10, FONT_DESCENT 2 (line height 12). ESPHome positio
 at y + (ascent - bitmap_top) = y + yOffset, so drawing with TextAlign::TOP_LEFT at the row top
 reproduces the original layout pixel for pixel.
 
-Usage: gfx2bdf.py <vbzfont.h> <out.bdf> [--preview]
+--scale N multiplies every glyph (bitmap, advance, offsets, line height) by N and --chars keeps
+only the listed characters. The 2x clock font is made with:
+
+  gfx2bdf.py fonts/upstream/vbzfont.h fonts/vbzfont-big.bdf --scale 2 --chars "0123456789:"
+
+Usage: gfx2bdf.py <vbzfont.h> <out.bdf> [--preview] [--scale N] [--chars STR]
 """
 
+import argparse
 import re
 import sys
 
@@ -200,32 +206,51 @@ def build_glyphs(bitmap, glyphs, first):
     return out
 
 
-def write_bdf(glyphs, path):
+def scale_glyphs(glyphs, n):
+    """Blow every glyph up by an integer factor (each pixel becomes an n x n block)."""
+    out = {}
+    for code, (advance, xo, yo, width, rows) in glyphs.items():
+        big_rows = []
+        for row in rows:
+            big_row = [bit for bit in row for _ in range(n)]
+            big_rows += [list(big_row) for _ in range(n)]
+        out[code] = (advance * n, xo * n, yo * n, width * n, big_rows)
+    return out
+
+
+def write_bdf(glyphs, path, scale=1):
+    ascent, descent, size = ASCENT * scale, DESCENT * scale, 12 * scale
     lines = [
         "STARTFONT 2.1",
         "COMMENT VBZ departure board font, converted from vbzfont.h",
         "COMMENT https://github.com/sschueller/vbz-fahrgastinformation",
         "COMMENT Copyright (c) 2022 Stefan Schueller - MIT License",
         "COMMENT Extra glyphs (J Q X j x ( ) + ! ?) added by tools/gfx2bdf.py",
-        "FONT -vbz-fahrgastinfo-medium-r-normal--12-120-75-75-p-70-iso10646-1",
-        "SIZE 12 75 75",
-        f"FONTBOUNDINGBOX 16 {ASCENT + DESCENT} 0 {-DESCENT}",
-        "STARTPROPERTIES 4",
-        f"FONT_ASCENT {ASCENT}",
-        f"FONT_DESCENT {DESCENT}",
-        "PIXEL_SIZE 12",
-        "DEFAULT_CHAR 32",
+    ]
+    if scale != 1:
+        lines.append(f"COMMENT Scaled {scale}x by tools/gfx2bdf.py --scale {scale}")
+    lines += [
+        f"FONT -vbz-fahrgastinfo-medium-r-normal--{size}-{size * 10}-75-75-p-{70 * scale}-iso10646-1",
+        f"SIZE {size} 75 75",
+        f"FONTBOUNDINGBOX {16 * scale} {ascent + descent} 0 {-descent}",
+    ]
+    props = [f"FONT_ASCENT {ascent}", f"FONT_DESCENT {descent}", f"PIXEL_SIZE {size}"]
+    if 0x20 in glyphs:  # a --chars subset may not have the space
+        props.append("DEFAULT_CHAR 32")
+    lines += [
+        f"STARTPROPERTIES {len(props)}",
+        *props,
         "ENDPROPERTIES",
         f"CHARS {len(glyphs)}",
     ]
     for code in sorted(glyphs):
         advance, xo, yo, width, rows = glyphs[code]
         height = len(rows)
-        bbx_y = ASCENT - (yo + height) if height else 0
+        bbx_y = ascent - (yo + height) if height else 0
         lines += [
             f"STARTCHAR U+{code:04X}",
             f"ENCODING {code}",
-            f"SWIDTH {advance * 1000 // 12} 0",
+            f"SWIDTH {advance * 1000 // size} 0",
             f"DWIDTH {advance} 0",
             f"BBX {width} {height} {xo if height else 0} {bbx_y}",
             "BITMAP",
@@ -243,32 +268,47 @@ def write_bdf(glyphs, path):
         f.write("\n".join(lines) + "\n")
 
 
-def preview(glyphs):
+def preview(glyphs, scale=1):
+    ascent = ASCENT * scale
     for code in sorted(glyphs):
         advance, xo, yo, width, rows = glyphs[code]
         print(f"U+{code:04X} {chr(code)!r} adv={advance} xo={xo} yo={yo} w={width} h={len(rows)}")
-        cell = [[" "] * (advance + 1) for _ in range(ASCENT + DESCENT)]
+        cell = [[" "] * (advance + 1) for _ in range(ascent + DESCENT * scale)]
         for r, row in enumerate(rows):
             for c, bit in enumerate(row):
                 y, x = yo + r, xo + c
                 if bit and 0 <= y < len(cell) and 0 <= x < len(cell[0]):
                     cell[y][x] = "#"
         for r, line in enumerate(cell):
-            marker = "_" if r == ASCENT - 1 else " "
+            marker = "_" if r == ascent - 1 else " "
             print(f"  |{''.join(line)}|{marker}")
 
 
 def main():
-    if len(sys.argv) < 3:
-        print(__doc__)
-        sys.exit(1)
-    bitmap, raw, first = parse_gfx(sys.argv[1])
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("source", help="upstream vbzfont.h")
+    ap.add_argument("output", help="BDF file to write")
+    ap.add_argument("--preview", action="store_true", help="print every glyph as ASCII art")
+    ap.add_argument("--scale", type=int, default=1, help="integer scale factor (default 1)")
+    ap.add_argument("--chars", help="only keep these characters (default: all)")
+    args = ap.parse_args()
+    if args.scale < 1:
+        ap.error("--scale must be >= 1")
+
+    bitmap, raw, first = parse_gfx(args.source)
     glyphs = build_glyphs(bitmap, raw, first)
-    write_bdf(glyphs, sys.argv[2])
-    if "--preview" in sys.argv:
-        preview(glyphs)
+    if args.chars:
+        missing = [ch for ch in args.chars if ord(ch) not in glyphs]
+        if missing:
+            ap.error(f"--chars: not in the font: {''.join(missing)!r}")
+        glyphs = {code: g for code, g in glyphs.items() if chr(code) in args.chars}
+    if args.scale != 1:
+        glyphs = scale_glyphs(glyphs, args.scale)
+    write_bdf(glyphs, args.output, args.scale)
+    if args.preview:
+        preview(glyphs, args.scale)
     chars = "".join(chr(c) for c in sorted(glyphs))
-    print(f"Wrote {len(glyphs)} glyphs to {sys.argv[2]}: {chars!r}", file=sys.stderr)
+    print(f"Wrote {len(glyphs)} glyphs to {args.output}: {chars!r}", file=sys.stderr)
 
 
 if __name__ == "__main__":

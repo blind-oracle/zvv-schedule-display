@@ -365,16 +365,16 @@ struct Row {
   int minutes;  // 0 => tram icon
 };
 
-inline std::vector<Row> visible_rows(int64_t now) {
+inline std::vector<Row> visible_rows(int64_t now, size_t max_rows = MAX_ROWS) {
   std::vector<Row> rows;
   for (const auto &d : board().departures) {
+    if (rows.size() >= max_rows)
+      break;
     const int64_t secs = d.est_ts() - now;
     if (secs < 0)
       continue;  // already gone
     const int minutes = secs <= 60 ? 0 : static_cast<int>(secs / 60);
     rows.push_back({&d, minutes});
-    if (rows.size() >= MAX_ROWS)
-      break;
   }
   return rows;
 }
@@ -417,10 +417,64 @@ inline void draw_board(Display &it, esphome::font::Font *font, const std::vector
     it.filled_rectangle(124, 62, 4, 2, error_color());
 }
 
-inline void draw_message(Display &it, esphome::font::Font *font, const std::string &text, Color color) {
+inline void draw_message(Display &it, esphome::font::Font *font, const std::string &text, Color color,
+                         size_t max_lines = 5) {
   const auto lines = wrap_text(it, font, font_safe(text), it.get_width());
-  for (size_t i = 0; i < lines.size() && i < 5; i++)
+  for (size_t i = 0; i < lines.size() && i < max_lines; i++)
     it.print(0, static_cast<int>(i) * 12, font, color, TextAlign::TOP_LEFT, lines[i].c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Clock band ("Show clock" switch): replaces departure rows 4 and 5 (y 39..63).
+// Left: HH:MM in fonts/vbzfont-big.bdf (the VBZ digits scaled 2x, 12x18 px).
+// Right: weekday over "13 Nov 26" in the normal font, on the row 4 / row 5 grid,
+// right-aligned to the panel edge. The widest weekday ("Wednesday", 64 px) still
+// leaves a gap of a few pixels next to the time.
+// ---------------------------------------------------------------------------
+static constexpr size_t CLOCK_DEPARTURE_ROWS = 3;   // departure / message lines kept above the band
+static constexpr int CLOCK_TIME_X = -2;             // the 2x digits have a 2 px left bearing: ink starts at x 0
+static constexpr int CLOCK_TIME_Y = 40;             // digits cover y 42..59, centred on the two text lines
+static constexpr int CLOCK_LINE1_Y = 3 * ROW_PITCH;  // 39, same as departure row 4
+static constexpr int CLOCK_LINE2_Y = 4 * ROW_PITCH;  // 52, same as departure row 5
+static constexpr int CLOCK_DATE_RIGHT_X = 128;       // TOP_RIGHT anchor: the last digit's ink ends at x 127
+// Every English weekday ends in "y", whose tail sticks out 1 px past its advance. Anchoring 1 px
+// further left keeps it on the panel and flush with the date.
+static constexpr int CLOCK_WEEKDAY_RIGHT_X = 127;
+
+struct ClockInfo {
+  int hour, minute;
+  int weekday;  // 0 = Sunday (ESPTime::day_of_week - 1, struct tm::tm_wday)
+  int day, month, year;
+};
+
+inline const char *weekday_name(int weekday) {
+  static const char *const NAMES[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+  return (weekday >= 0 && weekday < 7) ? NAMES[weekday] : "";
+}
+
+inline std::string clock_time_str(const ClockInfo &c) {
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%02d:%02d", c.hour % 100, c.minute % 100);
+  return buf;
+}
+
+// "13 Nov 26"
+inline std::string clock_date_str(const ClockInfo &c) {
+  static const char *const MONTHS[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  const char *month = (c.month >= 1 && c.month <= 12) ? MONTHS[c.month - 1] : "";
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%d %s %02d", c.day % 100, month, ((c.year % 100) + 100) % 100);
+  return buf;
+}
+
+// Changes once a minute (the weekday follows from the date).
+inline std::string clock_signature(const ClockInfo &c) { return clock_time_str(c) + "|" + clock_date_str(c); }
+
+inline void draw_clock(Display &it, esphome::font::Font *big, esphome::font::Font *small, const ClockInfo &c) {
+  it.print(CLOCK_TIME_X, CLOCK_TIME_Y, big, text_color(), TextAlign::TOP_LEFT, clock_time_str(c).c_str());
+  it.print(CLOCK_WEEKDAY_RIGHT_X, CLOCK_LINE1_Y, small, text_color(), TextAlign::TOP_RIGHT, weekday_name(c.weekday));
+  it.print(CLOCK_DATE_RIGHT_X, CLOCK_LINE2_Y, small, text_color(), TextAlign::TOP_RIGHT, clock_date_str(c).c_str());
 }
 
 // Red square with a white Swiss cross (like the original 34x34 splash bitmap).

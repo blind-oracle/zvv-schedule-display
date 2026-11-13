@@ -28,6 +28,7 @@ The display also follows these rules:
 - A tram icon replaces the minutes when the departure is less than a minute away.
 - The countdown updates every second from the local clock. Departures are fetched every 30 s.
 - A small red marker in the bottom-right corner means the data is more than 5 minutes old.
+- With **Show clock** on, the bottom two rows become a clock: the time in large digits on the left, and the weekday over the date (`Friday` / `13 Nov 26`) on the right. The clock stays visible when there are no departures or an error is shown.
 
 ## Hardware
 
@@ -84,6 +85,7 @@ If Wi-Fi can't connect, the device opens an access point called `zvv-schedule`. 
 | Lux at min / max brightness | The lux values mapped to min and max brightness, on a logarithmic scale. |
 | Brightness curve | Gamma of the curve: < 1 brightens faster in dim rooms, > 1 slower. |
 | Night schedule + Night start / Night end | Blanks the panel inside the window. The window may wrap past midnight. |
+| Show clock | Replaces the bottom two departure rows with the time, weekday and date. |
 | Test pattern | Shows R/G/B bars and a "bottom half" marker to check the colour order and the E line. |
 | Illuminance, Display brightness | The measured lux (throttled to every 30 s) and the brightness actually applied. |
 | Last update, Last error, Heap free, Heap max block | Diagnostics. |
@@ -114,8 +116,9 @@ Each brightness change rewrites the DMA buffers (about 1–2 ms), so changes sma
 | `includes/departures.h` | Parsing, layout, VBZ colours, brightness curve (C++) |
 | `includes/canvas.h` | Off-screen frame that is copied to the panel in one pass (no blink on redraw) |
 | `fonts/vbzfont.bdf` | VBZ font converted to BDF (generated) |
+| `fonts/vbzfont-big.bdf` | The VBZ digits scaled 2x for the clock (generated with `--scale 2 --chars "0123456789:"`) |
 | `fonts/upstream/vbzfont.h` | Original Adafruit-GFX font from the upstream project |
-| `tools/gfx2bdf.py` | Converter. Run `python3 tools/gfx2bdf.py fonts/upstream/vbzfont.h fonts/vbzfont.bdf --preview` |
+| `tools/gfx2bdf.py` | Converter. Run `python3 tools/gfx2bdf.py fonts/upstream/vbzfont.h fonts/vbzfont.bdf --preview`, and for the clock font `python3 tools/gfx2bdf.py fonts/upstream/vbzfont.h fonts/vbzfont-big.bdf --scale 2 --chars "0123456789:"` |
 | `tools/host_preview.cpp` | Renders the board on your computer as ASCII from live data, with the same font and alignment rules as the device, plus unit checks (see below) |
 
 ### Previewing the layout without hardware
@@ -125,8 +128,9 @@ Each brightness change rewrites the DMA buffers (about 1–2 ms), so changes sma
 ```sh
 AJ=$(dirname "$(find .esphome -path '*src/ArduinoJson.h' | head -1)")
 c++ -std=c++17 -I "$AJ" tools/host_preview.cpp -o /tmp/zvv-preview
-/tmp/zvv-preview --selftest fonts/vbzfont.bdf                  # unit checks + status screens
+/tmp/zvv-preview --selftest fonts/vbzfont.bdf fonts/vbzfont-big.bdf   # unit checks + status and clock screens
 curl -s "$(/tmp/zvv-preview --url 8576193)" | /tmp/zvv-preview fonts/vbzfont.bdf "C,D"
+curl -s "$(/tmp/zvv-preview --url 8576193)" | /tmp/zvv-preview fonts/vbzfont.bdf "" --clock fonts/vbzfont-big.bdf
 ```
 
 ## Credits and license

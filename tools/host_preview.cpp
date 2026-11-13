@@ -8,7 +8,8 @@
 //   c++ -std=c++17 -I <path-to-ArduinoJson/src> tools/host_preview.cpp -o /tmp/zvv-preview
 // Run:
 //   curl -s "$(/tmp/zvv-preview --url 8576193)" | /tmp/zvv-preview fonts/vbzfont.bdf [platform-filter]
-//   /tmp/zvv-preview --selftest fonts/vbzfont.bdf
+//   ... | /tmp/zvv-preview fonts/vbzfont.bdf [platform-filter] --clock fonts/vbzfont-big.bdf
+//   /tmp/zvv-preview --selftest fonts/vbzfont.bdf [fonts/vbzfont-big.bdf]
 
 #include <ArduinoJson.h>
 
@@ -18,6 +19,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -241,7 +243,7 @@ static void dump(const esphome::display::Display &d) {
   std::cout << '+' << std::string(128, '-') << "+\n";
 }
 
-static int selftest() {
+static int selftest(esphome::display::Display &it, esphome::font::Font *font, esphome::font::Font *big) {
   using namespace zvv;
   struct Case {
     const char *in, *out;
@@ -295,6 +297,53 @@ static int selftest() {
   expect(in_window(13 * 60, 12 * 60, 14 * 60), "plain window");
   expect(!in_window(14 * 60, 12 * 60, 14 * 60), "window end exclusive");
   expect(!in_window(600, 600, 600), "empty window");
+
+  const ClockInfo wed{9, 5, 3, 11, 11, 2026};
+  expect(clock_time_str(wed) == "09:05", "clock time");
+  expect(clock_date_str(wed) == "11 Nov 26", "clock date");
+  expect(clock_date_str({0, 0, 0, 5, 1, 2027}) == "5 Jan 27", "clock date, single-digit day");
+  expect(std::string(weekday_name(3)) == "Wednesday", "weekday name");
+  expect(std::string(weekday_name(0)) == "Sunday", "weekday 0 = Sunday");
+  expect(clock_signature(wed) != clock_signature({9, 6, 3, 11, 11, 2026}), "clock signature changes every minute");
+  if (big) {
+    // Ink (lit pixel) columns [left, right) of a string printed at x, from the glyph bitmaps.
+    // Unlike text_width() this includes glyph parts that stick out past their advance.
+    auto ink = [&](esphome::font::Font *f, const char *s, int x, TextAlign align) {
+      int x1, y1, w, h;
+      it.get_text_bounds(x, 0, s, f, align, &x1, &y1, &w, &h);
+      int left = 1 << 20, right = -(1 << 20);
+      for (const char *p = s; *p;) {
+        const auto *g = f->find(esphome::display::next_cp(p));
+        if (g && g->width) {
+          left = std::min(left, x1 + g->offset_x);
+          right = std::max(right, x1 + g->offset_x + g->width);
+        }
+        x1 += g ? g->advance : f->fallback_advance();
+      }
+      return std::make_pair(left, right);
+    };
+    int time_right = 0;  // widest possible time
+    for (const char *t : {"00:00", "08:08", "23:58"})
+      time_right = std::max(time_right, ink(big, t, CLOCK_TIME_X, TextAlign::TOP_LEFT).second);
+    expect(ink(big, "08:08", CLOCK_TIME_X, TextAlign::TOP_LEFT).first == 0, "time flush with x 0");
+    for (int m = 1; m <= 12; m++) {
+      const std::string s = clock_date_str({0, 0, 0, 28, m, 2026});
+      const auto date = ink(font, s.c_str(), CLOCK_DATE_RIGHT_X, TextAlign::TOP_RIGHT);
+      if (date.first < time_right + 3 || date.second != 128) {
+        std::cerr << s << ": ink x " << date.first << ".." << date.second - 1 << ", time ends at x "
+                  << time_right - 1 << " (need a 3 px gap and ink flush with x 127)\n";
+        fails++;
+      }
+    }
+    for (int d = 0; d < 7; d++) {
+      const auto wd = ink(font, weekday_name(d), CLOCK_WEEKDAY_RIGHT_X, TextAlign::TOP_RIGHT);
+      if (wd.first < time_right + 3 || wd.second != 128) {
+        std::cerr << weekday_name(d) << ": ink x " << wd.first << ".." << wd.second - 1 << ", time ends at x "
+                  << time_right - 1 << " (need a 3 px gap and ink flush with x 127)\n";
+        fails++;
+      }
+    }
+  }
   std::cout << (fails ? "selftest FAILED" : "selftest OK") << " (" << fails << " failures)\n";
   return fails ? 1 : 0;
 }
@@ -306,8 +355,11 @@ int main(int argc, char **argv) {
   }
   if (argc >= 3 && std::string(argv[1]) == "--selftest") {
     esphome::font::Font font(argv[2]);
+    std::unique_ptr<esphome::font::Font> big;
+    if (argc >= 4)
+      big = std::make_unique<esphome::font::Font>(argv[3]);
     esphome::display::Display it;
-    int rc = selftest();
+    int rc = selftest(it, &font, big.get());
     // Render the static screens too.
     it.fill(esphome::Color::BLACK);
     zvv::draw_splash(it, &font);
@@ -318,14 +370,28 @@ int main(int argc, char **argv) {
     it.fill(esphome::Color::BLACK);
     zvv::draw_message(it, &font, "No connection to transport.opendata.ch", zvv::error_color());
     dump(it);
-    return rc || font.missing;
+    if (big) {
+      it.fill(esphome::Color::BLACK);
+      zvv::draw_message(it, &font, "keine Abfahrten", esphome::Color(255, 255, 255), zvv::CLOCK_DEPARTURE_ROWS);
+      zvv::draw_clock(it, big.get(), &font, {9, 5, 3, 11, 11, 2026});
+      dump(it);
+    }
+    return rc || font.missing || (big && big->missing);
   }
-  if (argc < 2) {
-    std::cerr << "usage: zvv-preview <vbzfont.bdf> [platform-filter] < stationboard.json\n";
+  std::vector<std::string> args;
+  std::unique_ptr<esphome::font::Font> big;  // --clock: draw the clock band like the "Show clock" switch
+  for (int i = 1; i < argc; i++) {
+    if (std::string(argv[i]) == "--clock" && i + 1 < argc)
+      big = std::make_unique<esphome::font::Font>(argv[++i]);
+    else
+      args.push_back(argv[i]);
+  }
+  if (args.empty()) {
+    std::cerr << "usage: zvv-preview <vbzfont.bdf> [platform-filter] [--clock <vbzfont-big.bdf>] < stationboard.json\n";
     return 1;
   }
-  esphome::font::Font font(argv[1]);
-  const std::string filter = argc >= 3 ? argv[2] : "";
+  esphome::font::Font font(args[0]);
+  const std::string filter = args.size() >= 2 ? args[1] : "";
   std::stringstream buf;
   buf << std::cin.rdbuf();
   JsonDocument doc;
@@ -343,9 +409,17 @@ int main(int argc, char **argv) {
               << (d.live ? " live" : " sched") << " in " << (d.est_ts() - now) << "s\n";
   esphome::display::Display it;
   it.fill(esphome::Color::BLACK);
-  const auto rows = zvv::visible_rows(now);
+  const auto rows = zvv::visible_rows(now, big ? zvv::CLOCK_DEPARTURE_ROWS : zvv::MAX_ROWS);
   zvv::draw_board(it, &font, rows, false);
+  std::string sig = zvv::board_signature(rows, false);
+  if (big) {
+    const std::time_t t = now;
+    const std::tm *lt = std::localtime(&t);
+    const zvv::ClockInfo ci{lt->tm_hour, lt->tm_min, lt->tm_wday, lt->tm_mday, lt->tm_mon + 1, lt->tm_year + 1900};
+    zvv::draw_clock(it, big.get(), &font, ci);
+    sig += "|" + zvv::clock_signature(ci);
+  }
   dump(it);
-  std::cout << "signature: " << zvv::board_signature(rows, false) << "\n";
-  return font.missing ? 2 : 0;
+  std::cout << "signature: " << sig << "\n";
+  return (font.missing || (big && big->missing)) ? 2 : 0;
 }
