@@ -10,7 +10,7 @@ This is an ESPHome port of [sschueller/vbz-fahrgastinformation](https://github.c
 | Wi-Fi setup | AutoConnect portal | ESPHome fallback AP + captive portal |
 | Brightness | LDR on GPIO36 | BH1750 with a log curve, tunable min/max/curve, manual override, night schedule |
 | Time | NTP with a fixed UTC+1 offset | SNTP with `Europe/Zurich` (handles daylight saving) |
-| Direction filter | TRIAS H/R direction | Platform filter (e.g. `C` or `C,D`) |
+| Direction filter | TRIAS H/R direction | Platform filter (e.g. `C` or `C,D`) or Via stop (a stop the trip passes, e.g. `Central`) |
 | Low-floor icon | Yes | No (transport.opendata.ch doesn't provide it) |
 
 ## Display
@@ -79,7 +79,9 @@ If Wi-Fi can't connect, the device opens an access point called `zvv-schedule`. 
 
 | Entity | Purpose |
 |---|---|
-| Station ID / Platform filter | The stop to show and an optional comma-separated platform list. Some stops have no platform data, so leave the filter empty there. |
+| Station ID / Platform filter | The stop to show and an optional comma-separated platform list. |
+| Via stop | Shows only trips that pass a stop whose name contains one of the comma-separated terms (case-insensitive), e.g. `Schlyfi` or `Central,Bellevue`. The stop you're at doesn't count, and the trip's destination does. Use it at stops without platform data. |
+| Directions | Lists every direction at the stop, before filtering, as `[platform] next stop: lines > destinations`, e.g. `Schlyfi: 31 > Hermetschloo; Herdernstrasse \| Waserstrasse: 31 > Kienastenwies`. Check it to see which platform letter or Via stop picks one direction. A platform only appears when the stop has platform data. |
 | Auto brightness | On: brightness follows the BH1750 curve. Off: **Manual brightness** is used. |
 | Brightness min / max | The brightness range (0–255) of the auto curve. |
 | Lux at min / max brightness | The lux values mapped to min and max brightness, on a logarithmic scale. |
@@ -104,7 +106,7 @@ Each brightness change rewrites the DMA buffers (about 1–2 ms), so changes sma
 - **Wrong colours in the test pattern:** use the rotated pin set commented in `substitutions:`. The original firmware needed it for its panel.
 - **Panel stays dark or shows garbage:** try `shift_driver: FM6126A`, then `clock_speed: 10MHZ`.
 - **Flicker or ghosting:** lower `clock_speed`, or try `min_refresh_rate` 60–120.
-- **Low heap or random resets:** check *Heap free* (it should stay above about 40 KB). Lower `bit_depth` to 6 if needed. `double_buffer` is off on purpose: one panel buffer is 64 KB of DMA RAM, and a second one doesn't fit next to Wi-Fi. Each frame is drawn into a 16 KB off-screen canvas instead and copied to the panel in one pass, so redraws don't blink.
+- **Low heap or random resets:** check *Heap free* (it should stay above about 40 KB) and *Heap max block*: each fetch allocates a 24 KB response buffer in one piece (`response_buffer_bytes`). A typical response is 7–16 KB. A larger one is reported as "API response too large". Lower `bit_depth` to 6 if needed. `double_buffer` is off on purpose: one panel buffer is 64 KB of DMA RAM, and a second one doesn't fit next to Wi-Fi. Each frame is drawn into a 16 KB off-screen canvas instead and copied to the panel in one pass, so redraws don't blink.
 - **Panel still blinks:** every redraw logs `[zvv] redraw` at DEBUG level. If a blink doesn't line up with one of those lines, it isn't the drawing. Check the 5 V supply and C1 (Wi-Fi transmit bursts can make a weak supply sag).
 - **Boxes instead of letters:** a character is missing from the font. Add a mapping to `font_safe()` in `includes/departures.h`, or draw the glyph in `tools/gfx2bdf.py` (`EXTRA`) and regenerate the font.
 

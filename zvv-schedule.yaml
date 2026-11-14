@@ -10,6 +10,9 @@ substitutions:
   name: zvv-schedule
   friendly_name: ZVV Schedule
   ap_password: !secret wifi_pass
+  # HTTP response buffer for the stationboard request (bytes). A larger response is reported
+  # as "API response too large".
+  response_buffer_bytes: "24000"
 
   # HUB75 colour data pins as labelled on the shield (HUB75 pins 1,2,3,5,6,7).
   # If the "Test pattern" switch shows the bars in the wrong colours, replace these six
@@ -254,7 +257,9 @@ script:
             - http_request.get:
                 url: !lambda return zvv::stationboard_url(id(station_id).state, 15);
                 capture_response: true
-                max_response_buffer_size: 8kB
+                # Allocated in one piece on every fetch. With the passList stop names a 15-departure
+                # response is ~8-15 kB (bus lines with long routes are the largest).
+                max_response_buffer_size: ${response_buffer_bytes}
                 on_response:
                   then:
                     - lambda: |-
@@ -262,16 +267,24 @@ script:
                         if (response->status_code != 200) {
                           b.last_error = "API error: HTTP " + std::to_string(response->status_code);
                           ESP_LOGW("zvv", "stationboard returned HTTP %d", response->status_code);
+                        } else if (body.size() >= ${response_buffer_bytes}) {
+                          b.last_error = "API response too large";  // truncated, would not parse
+                          ESP_LOGW("zvv", "stationboard response exceeds %u bytes", (unsigned) body.size());
                         } else {
                           const int64_t now = id(sntp_time).now().timestamp;
                           const std::string filter = id(platform_filter).state;
-                          const bool ok = json::parse_json(body, [now, &filter](JsonObject root) -> bool {
-                            return zvv::parse_stationboard(root, filter, now);
+                          const std::string via = id(via_filter).state;
+                          const bool ok = json::parse_json(body, [now, &filter, &via](JsonObject root) -> bool {
+                            return zvv::parse_stationboard(root, filter, via, now);
                           });
                           if (!ok && b.last_error.empty())
                             b.last_error = "API error: invalid JSON";
-                          if (ok)
-                            ESP_LOGD("zvv", "%u departures loaded", (unsigned) b.departures.size());
+                          if (ok) {
+                            ESP_LOGD("zvv", "%u departures loaded (%u bytes)", (unsigned) b.departures.size(),
+                                     (unsigned) body.size());
+                            if (id(directions).state != b.directions)
+                              id(directions).publish_state(b.directions);
+                          }
                         }
                         id(last_error).publish_state(b.last_error.empty() ? "OK" : b.last_error);
                         if (b.last_error.empty())
@@ -371,6 +384,14 @@ text_sensor:
     icon: mdi:alert-circle-outline
     entity_category: diagnostic
 
+  # Every direction seen at the stop (before filtering): "[platform] next stop: lines > destinations".
+  # Tells what to put into Platform filter or Via stop.
+  - platform: template
+    id: directions
+    name: Directions
+    icon: mdi:sign-direction
+    entity_category: diagnostic
+
   - platform: wifi_info
     ip_address:
       id: ip_address
@@ -404,6 +425,22 @@ text:
     restore_value: true
     initial_value: ""
     max_length: 32
+    entity_category: config
+    on_value:
+      - script.execute: fetch_departures
+
+  # Direction filter for stops without per-direction platforms: only trips that pass a stop
+  # containing one of these comma-separated names (e.g. "Schlyfi" or "Central,HB").
+  # The "Directions" sensor lists the next stop of each direction.
+  - platform: template
+    id: via_filter
+    name: Via stop
+    icon: mdi:map-marker-path
+    mode: text
+    optimistic: true
+    restore_value: true
+    initial_value: ""
+    max_length: 64
     entity_category: config
     on_value:
       - script.execute: fetch_departures

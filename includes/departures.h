@@ -65,6 +65,7 @@ struct BoardState {
   std::vector<Departure> departures;
   int64_t last_ok_ts{0};  // unix time of the last successful fetch
   std::string last_error;
+  std::string directions;  // what leaves from this stop, per platform / next stop (unfiltered)
 };
 
 inline BoardState &board() {
@@ -311,25 +312,166 @@ inline bool platform_matches(const std::string &platform, const std::string &fil
   return false;
 }
 
-// Fills board().departures. Returns false (and sets last_error) if the document is unusable.
-inline bool parse_stationboard(JsonObject root, const std::string &platform_filter, int64_t now) {
+// ---------------------------------------------------------------------------
+// Direction: "Via stop" filter and the "Directions" summary.
+// transport.opendata.ch has no direction field, and many stops have no platform data, so the
+// direction is taken from passList: the stops the trip visits after this one.
+// ---------------------------------------------------------------------------
+
+// Lowercase for case-insensitive matching: ASCII plus Latin-1 capitals (Ä Ö Ü É ...) in UTF-8.
+inline std::string fold(const std::string &s) {
+  std::string out = s;
+  for (size_t i = 0; i < out.size(); i++) {
+    const auto c = static_cast<unsigned char>(out[i]);
+    if (c >= 'A' && c <= 'Z') {
+      out[i] = static_cast<char>(c - 'A' + 'a');
+    } else if (c == 0xC3 && i + 1 < out.size()) {
+      const auto n = static_cast<unsigned char>(out[i + 1]);
+      if (n >= 0x80 && n <= 0x9E && n != 0x97)  // À..Þ except ×
+        out[i + 1] = static_cast<char>(n + 0x20);
+      i++;
+    }
+  }
+  return out;
+}
+
+// Comma-separated list -> trimmed, non-empty terms.
+inline std::vector<std::string> split_terms(const std::string &list) {
+  std::vector<std::string> terms;
+  size_t pos = 0;
+  while (pos <= list.size()) {
+    size_t end = list.find(',', pos);
+    if (end == std::string::npos)
+      end = list.size();
+    std::string t = trim(list.substr(pos, end - pos));
+    if (!t.empty())
+      terms.push_back(std::move(t));
+    pos = end + 1;
+  }
+  return terms;
+}
+
+// True if `via` is empty, or one of its comma-separated terms is part of the destination or of
+// a stop the trip passes after this one (case-insensitive). passList[0] is this stop: skipped.
+inline bool via_matches(JsonArray pass_list, const std::string &to, const std::string &via) {
+  const auto terms = split_terms(via);
+  if (terms.empty())
+    return true;
+  std::vector<std::string> names{fold(to)};
+  size_t i = 0;
+  for (JsonObject p : pass_list) {
+    const char *name = p["station"]["name"] | "";
+    if (i++ > 0 && *name)
+      names.push_back(fold(name));
+  }
+  for (const auto &t : terms) {
+    const std::string ft = fold(t);
+    for (const auto &n : names)
+      if (n.find(ft) != std::string::npos)
+        return true;
+  }
+  return false;
+}
+
+// The stop right after this one ("Zürich, Schlyfi" -> "Schlyfi"), or "" if unknown.
+inline std::string next_stop(JsonArray pass_list) {
+  if (pass_list.size() < 2)
+    return "";
+  return clean_destination(pass_list[1]["station"]["name"] | "");
+}
+
+// Cut to at most max_len bytes without splitting a UTF-8 character.
+inline void utf8_truncate(std::string &s, size_t max_len) {
+  if (s.size() <= max_len)
+    return;
+  s.resize(max_len);
+  size_t i = s.size();
+  while (i > 0 && (static_cast<unsigned char>(s[i - 1]) & 0xC0) == 0x80)
+    i--;  // i - 1 is now the lead byte of the last character (or ASCII)
+  if (i > 0) {
+    const auto lead = static_cast<unsigned char>(s[i - 1]);
+    const size_t len = (lead >= 0xF0) ? 4 : (lead >= 0xE0) ? 3 : (lead >= 0xC0) ? 2 : 1;
+    if (s.size() - (i - 1) < len)
+      s.erase(i - 1);
+  }
+}
+
+struct DirectionGroup {
+  std::string platform, next;
+  std::vector<std::string> lines, dests;
+};
+
+inline void add_unique(std::vector<std::string> &v, const std::string &s) {
+  if (!s.empty() && std::find(v.begin(), v.end(), s) == v.end())
+    v.push_back(s);
+}
+
+inline void add_direction(std::vector<DirectionGroup> &groups, const std::string &platform, const std::string &next,
+                          const std::string &line, const std::string &dest) {
+  auto it = std::find_if(groups.begin(), groups.end(), [&](const DirectionGroup &g) {
+    return g.platform == platform && g.next == next;
+  });
+  if (it == groups.end()) {
+    groups.push_back({platform, next, {}, {}});
+    it = groups.end() - 1;
+  }
+  add_unique(it->lines, line);
+  add_unique(it->dests, dest);
+}
+
+// "[A] Haldenegg: 6,10 > Bahnhofplatz/HB | Schlyfi: 31 > Hermetschloo; Herdernstrasse"
+// (platform and next stop are left out when unknown). Cut to Home Assistant's 255-char state limit.
+inline std::string directions_summary(const std::vector<DirectionGroup> &groups, size_t max_len = 255) {
+  auto join = [](const std::vector<std::string> &v, const char *sep) {
+    std::string s;
+    for (const auto &x : v)
+      s += (s.empty() ? "" : sep) + x;
+    return s;
+  };
+  std::string out;
+  for (const auto &g : groups) {
+    if (!out.empty())
+      out += " | ";
+    if (!g.platform.empty())
+      out += "[" + g.platform + "] ";
+    if (!g.next.empty())
+      out += g.next + ": ";
+    out += join(g.lines, ",") + " > " + join(g.dests, "; ");  // names may contain ","
+  }
+  if (out.size() > max_len) {
+    utf8_truncate(out, max_len - 3);
+    out += "...";
+  }
+  return out;
+}
+
+// Fills board().departures and board().directions. Returns false (and sets last_error) if the
+// document is unusable. The directions summary covers every departure, before filtering.
+inline bool parse_stationboard(JsonObject root, const std::string &platform_filter, const std::string &via_filter,
+                               int64_t now) {
   JsonArray items = root["stationboard"].as<JsonArray>();
   if (items.isNull()) {
     board().last_error = "Unexpected API response";
     return false;
   }
   std::vector<Departure> out;
+  std::vector<DirectionGroup> directions;
   for (JsonObject j : items) {
     JsonObject stop = j["stop"];
+    JsonArray pass_list = j["passList"];
+    const char *to = j["to"] | "";
     Departure d;
     d.category = j["category"] | "";
     d.label = line_label(d.category, j["number"] | "");
-    d.dest = clean_destination(j["to"] | "");
-    d.platform = stop["platform"] | "";
+    d.dest = clean_destination(to);
+    d.platform = trim(stop["platform"] | "");
     d.sched_ts = stop["departureTimestamp"] | static_cast<int64_t>(0);
     d.delay_min = stop["delay"] | 0;
     d.live = !stop["prognosis"]["departure"].isNull();
-    if (d.sched_ts <= 0 || !platform_matches(d.platform, platform_filter))
+    if (d.sched_ts <= 0)
+      continue;
+    add_direction(directions, d.platform, next_stop(pass_list), d.label, d.dest);
+    if (!platform_matches(d.platform, platform_filter) || !via_matches(pass_list, to, via_filter))
       continue;
     out.push_back(std::move(d));
   }
@@ -338,6 +480,7 @@ inline bool parse_stationboard(JsonObject root, const std::string &platform_filt
   if (out.size() > MAX_KEEP)
     out.resize(MAX_KEEP);
   board().departures = std::move(out);
+  board().directions = directions_summary(directions);
   board().last_ok_ts = now;
   board().last_error.clear();
   return true;
@@ -351,6 +494,7 @@ inline std::string stationboard_url(const std::string &station_id, size_t limit)
       "stationboard/to",                "stationboard/stop/platform",
       "stationboard/stop/departureTimestamp", "stationboard/stop/delay",
       "stationboard/stop/prognosis/departure",
+      "stationboard/passList/station/name",  // direction: Via stop filter + Directions summary
   };
   for (const char *f : FIELDS)
     url += std::string("&fields%5B%5D=") + f;

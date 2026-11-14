@@ -8,7 +8,7 @@
 //   c++ -std=c++17 -I <path-to-ArduinoJson/src> tools/host_preview.cpp -o /tmp/zvv-preview
 // Run:
 //   curl -s "$(/tmp/zvv-preview --url 8576193)" | /tmp/zvv-preview fonts/vbzfont.bdf [platform-filter]
-//   ... | /tmp/zvv-preview fonts/vbzfont.bdf [platform-filter] --clock fonts/vbzfont-big.bdf
+//   ... | /tmp/zvv-preview fonts/vbzfont.bdf [platform-filter] --via "Schlyfi" --clock fonts/vbzfont-big.bdf
 //   /tmp/zvv-preview --selftest fonts/vbzfont.bdf [fonts/vbzfont-big.bdf]
 
 #include <ArduinoJson.h>
@@ -298,6 +298,74 @@ static int selftest(esphome::display::Display &it, esphome::font::Font *font, es
   expect(!in_window(14 * 60, 12 * 60, 14 * 60), "window end exclusive");
   expect(!in_window(600, 600, 600), "empty window");
 
+  // Direction: Via stop filter and the Directions summary.
+  expect(fold("ZÜRICH, Äsch É") == "zürich, äsch é", "fold ASCII + umlauts");
+  expect(split_terms(" a, ,b ,") == std::vector<std::string>({"a", "b"}), "split_terms");
+  {
+    std::string s = "aü";
+    utf8_truncate(s, 2);
+    expect(s == "a", "utf8_truncate drops a split character");
+  }
+  {
+    // Bus 31 at Drusbergstrasse (no platforms, two directions) plus a tram with a platform.
+    // passList[0] is the departure stop itself.
+    const int64_t t0 = 1794600000;
+    const std::string json = R"({"stationboard":[
+      {"category":"B","number":"31","to":"Zürich, Hermetschloo",
+       "stop":{"platform":null,"departureTimestamp":)" + std::to_string(t0 + 300) + R"(,"delay":0,"prognosis":{"departure":null}},
+       "passList":[{"station":{"name":null}},{"station":{"name":"Zürich, Schlyfi"}},{"station":{"name":"Zürich, Kapfstrasse"}},{"station":{"name":"Zürich, Hermetschloo"}}]},
+      {"category":"B","number":"31","to":"Zürich, Kienastenwies",
+       "stop":{"platform":null,"departureTimestamp":)" + std::to_string(t0 + 400) + R"(,"delay":0,"prognosis":{"departure":null}},
+       "passList":[{"station":{"name":"Zürich, Drusbergstrasse"}},{"station":{"name":"Zürich, Waserstrasse"}},{"station":{"name":"Zürich, Kienastenwies"}}]},
+      {"category":"T","number":"6","to":"Zürich, Bahnhofplatz/HB",
+       "stop":{"platform":"A","departureTimestamp":)" + std::to_string(t0 + 500) + R"(,"delay":0,"prognosis":{"departure":null}},
+       "passList":[{"station":{"name":null}},{"station":{"name":"Zürich, Haldenegg"}},{"station":{"name":"Zürich, Central"}},{"station":{"name":"Zürich, Bahnhofplatz/HB"}}]},
+      {"category":"B","number":"31","to":"Zürich, Herdernstrasse",
+       "stop":{"platform":null,"departureTimestamp":)" + std::to_string(t0 + 600) + R"(,"delay":0,"prognosis":{"departure":null}},
+       "passList":[{"station":{"name":null}},{"station":{"name":"Zürich, Schlyfi"}},{"station":{"name":"Zürich, Herdernstrasse"}}]}
+    ]})";
+    JsonDocument doc;
+    expect(!deserializeJson(doc, json), "test stationboard JSON parses");
+    const std::string all_dirs =
+        "Schlyfi: 31 > Hermetschloo; Herdernstrasse | Waserstrasse: 31 > Kienastenwies | [A] Haldenegg: 6 > Bahnhofplatz/HB";
+    auto run = [&](const char *platform, const char *via) {
+      parse_stationboard(doc.as<JsonObject>(), platform, via, t0);
+      std::string dests;
+      for (const auto &d : board().departures)
+        dests += (dests.empty() ? "" : ",") + d.dest;
+      if (board().directions != all_dirs) {
+        std::cerr << "directions = '" << board().directions << "'\n";
+        fails++;
+      }
+      return dests;
+    };
+    auto expect_dests = [&](const char *platform, const char *via, const std::string &want) {
+      const std::string got = run(platform, via);
+      if (got != want) {
+        std::cerr << "filter platform='" << platform << "' via='" << via << "': got '" << got << "', expected '" << want
+                  << "'\n";
+        fails++;
+      }
+    };
+    expect_dests("", "", "Hermetschloo,Kienastenwies,Bahnhofplatz/HB,Herdernstrasse");
+    expect_dests("", "schlyfi", "Hermetschloo,Herdernstrasse");
+    expect_dests("", "Drusbergstrasse", "");  // the departure stop itself never matches
+    expect_dests("", "foo, CENTRAL ,", "Bahnhofplatz/HB");  // terms are comma-separated
+    expect_dests("", "waser,ÜRICH X", "Kienastenwies");
+    expect_dests("", "ÜRICH", "Hermetschloo,Kienastenwies,Bahnhofplatz/HB,Herdernstrasse");  // Ü folds to ü
+    expect_dests("", "Kienastenwies", "Kienastenwies");
+    expect_dests("A", "", "Bahnhofplatz/HB");
+    expect_dests("A", "Schlyfi", "");
+    expect_dests("", " , ", "Hermetschloo,Kienastenwies,Bahnhofplatz/HB,Herdernstrasse");
+  }
+  {
+    std::vector<DirectionGroup> many;
+    for (int i = 0; i < 30; i++)
+      add_direction(many, "", "Zürich Stop " + std::to_string(i), std::to_string(i), "Destination");
+    const std::string s = directions_summary(many);
+    expect(s.size() <= 255 && s.size() >= 250 && s.compare(s.size() - 3, 3, "...") == 0, "directions cut to 255");
+  }
+
   const ClockInfo wed{9, 5, 3, 11, 11, 2026};
   expect(clock_time_str(wed) == "09:05", "clock time");
   expect(clock_date_str(wed) == "11 Nov 26", "clock date");
@@ -380,30 +448,36 @@ int main(int argc, char **argv) {
   }
   std::vector<std::string> args;
   std::unique_ptr<esphome::font::Font> big;  // --clock: draw the clock band like the "Show clock" switch
+  std::string via;                           // --via: like the "Via stop" text entity
   for (int i = 1; i < argc; i++) {
     if (std::string(argv[i]) == "--clock" && i + 1 < argc)
       big = std::make_unique<esphome::font::Font>(argv[++i]);
+    else if (std::string(argv[i]) == "--via" && i + 1 < argc)
+      via = argv[++i];
     else
       args.push_back(argv[i]);
   }
   if (args.empty()) {
-    std::cerr << "usage: zvv-preview <vbzfont.bdf> [platform-filter] [--clock <vbzfont-big.bdf>] < stationboard.json\n";
+    std::cerr << "usage: zvv-preview <vbzfont.bdf> [platform-filter] [--via <stops>] [--clock <vbzfont-big.bdf>]"
+                 " < stationboard.json\n";
     return 1;
   }
   esphome::font::Font font(args[0]);
   const std::string filter = args.size() >= 2 ? args[1] : "";
   std::stringstream buf;
   buf << std::cin.rdbuf();
+  std::cout << "response: " << buf.str().size() << " bytes\n";
   JsonDocument doc;
   if (deserializeJson(doc, buf.str())) {
     std::cerr << "invalid JSON\n";
     return 1;
   }
   const int64_t now = std::time(nullptr);
-  if (!zvv::parse_stationboard(doc.as<JsonObject>(), filter, now)) {
+  if (!zvv::parse_stationboard(doc.as<JsonObject>(), filter, via, now)) {
     std::cerr << zvv::board().last_error << "\n";
     return 1;
   }
+  std::cout << "directions: " << zvv::board().directions << "\n";
   for (const auto &d : zvv::board().departures)
     std::cout << d.label << " [" << d.category << "] " << d.dest << " pl=" << d.platform << " +" << d.delay_min
               << (d.live ? " live" : " sched") << " in " << (d.est_ts() - now) << "s\n";
