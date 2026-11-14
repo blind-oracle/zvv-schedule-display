@@ -1,6 +1,12 @@
 # ZVV Schedule: ESPHome departure board
 
+![Device](table.jpg)
+
 This is an ESPHome port of [sschueller/vbz-fahrgastinformation](https://github.com/sschueller/vbz-fahrgastinformation). It shows live departures for a Zürich public transport stop on a 128x64 HUB75 RGB matrix. It runs on hallard's [WeMos-Matrix-Shield-DMA](https://github.com/hallard/WeMos-Matrix-Shield-DMA) (V1.9), and a BH1750 light sensor controls the brightness.
+
+It is configured over Home Assistant, but can work without it.
+
+The 3D-printable wall bracket STL model is included, it has a cutout for the BH1750 light sensor.
 
 | Area | Original firmware | This port |
 |---|---|---|
@@ -39,6 +45,11 @@ The display also follows these rules:
 | 128x64 HUB75 panel, 1/32 scan | The same panel type as the original project. |
 | GY-302 BH1750 module | Plugs straight into the shield's 4-pin I2C header J1. |
 | 5 V power supply, ≥ 4 A | Power the panel directly. Fit C1 (100 µF) on the shield to avoid brownout loops. |
+
+The 4A power supply is not a hard requirement - with standard display contents that this firmware uses, it consumes only 3-5W on average.
+So you can use a standard USB 1-2A adapter and it will work fine.
+
+Probably if you light all the pixels up to 100% brightness - then it will eat 20W, though I haven't tried.
 
 ### Pin map (from the shield schematic)
 
