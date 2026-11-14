@@ -327,6 +327,16 @@ static int selftest(esphome::display::Display &it, esphome::font::Font *font, es
     expect(same == 1, "text colour names unique");
     expect(!(text_color(a.name) == error_color()), "text colour differs from the error colour");
   }
+  {
+    const esphome::Color amber = text_color("Amber");
+    Departure bus, tram2, tram13;
+    bus.category = "B", bus.label = "31";
+    tram2.category = "T", tram2.label = "2";
+    tram13.category = "T", tram13.label = "13";
+    expect(line_fg(bus, amber) == amber, "bus line number in the text colour");
+    expect(line_fg(tram2, amber) == amber, "tram 2 line number in the text colour");
+    expect(line_fg(tram13, amber) == esphome::Color(0, 0, 0), "tram 13 line number stays black");
+  }
   expect(in_window(13 * 60, 12 * 60, 14 * 60), "plain window");
   expect(!in_window(14 * 60, 12 * 60, 14 * 60), "window end exclusive");
   expect(!in_window(600, 600, 600), "empty window");

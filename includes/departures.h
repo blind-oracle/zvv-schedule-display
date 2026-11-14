@@ -48,7 +48,8 @@ static const char *const TRAM_ICON = "\xEE\x80\x80";  // U+E000 in vbzfont.bdf
 static const char *const TICK_LIVE = "`";
 static const char *const TICK_SCHEDULED = "'";
 
-// Text colours for the "Text color" select (board, clock and status text; not the line boxes).
+// Text colours for the "Text color" select (board, clock, status text and line numbers; the line
+// boxes keep their VBZ colours).
 // Keep the names in sync with its options in zvv-schedule.yaml. No red: errors use it.
 struct TextColorPreset {
   const char *name;
@@ -332,13 +333,14 @@ inline Color line_bg(const Departure &d) {
   }
 }
 
-inline Color line_fg(const Departure &d) {
+// Line number colour: the text colour, except black on the light tram 8 and 13 boxes.
+inline Color line_fg(const Departure &d, Color fg) {
   if (d.category == "T") {
     const int n = std::atoi(d.label.c_str());
     if (n == 8 || n == 13)
       return Color(0, 0, 0);
   }
-  return Color(255, 255, 255);
+  return fg;
 }
 
 // ---------------------------------------------------------------------------
@@ -590,7 +592,7 @@ inline void draw_board(Display &it, esphome::font::Font *font, const std::vector
 
     // Line number box
     it.filled_rectangle(0, y, LINE_BOX_W, LINE_BOX_H, line_bg(d));
-    it.print(LINE_BOX_W / 2, y, font, line_fg(d), TextAlign::TOP_CENTER, d.label.c_str());
+    it.print(LINE_BOX_W / 2, y, font, line_fg(d, fg), TextAlign::TOP_CENTER, d.label.c_str());
 
     // Destination
     const std::string dest = crop_to_width(it, font, d.dest, DEST_MAX_W);

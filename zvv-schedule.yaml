@@ -17,14 +17,19 @@ substitutions:
   # HUB75 colour data pins as labelled on the shield (HUB75 pins 1,2,3,5,6,7).
   # If the "Test pattern" switch shows the bars in the wrong colours, replace these six
   # with the rotated mapping the original firmware used for its panel:
-  #   r1_pin: GPIO26  g1_pin: GPIO27  b1_pin: GPIO25
-  #   r2_pin: GPIO12  g2_pin: GPIO13  b2_pin: GPIO14
-  r1_pin: GPIO25
-  g1_pin: GPIO26
-  b1_pin: GPIO27
-  r2_pin: GPIO14
-  g2_pin: GPIO12
-  b2_pin: GPIO13
+  # r1_pin: GPIO25
+  # g1_pin: GPIO26
+  # b1_pin: GPIO27
+  # r2_pin: GPIO14
+  # g2_pin: GPIO12
+  # b2_pin: GPIO13
+
+  r1_pin: GPIO26
+  g1_pin: GPIO27
+  b1_pin: GPIO25
+  r2_pin: GPIO12
+  g2_pin: GPIO13
+  b2_pin: GPIO14
 
 esphome:
   name: ${name}
@@ -573,8 +578,9 @@ switch:
     entity_category: diagnostic
 
 select:
-  # Colour of the board, clock and status text. The line boxes keep the VBZ colours and errors
-  # stay red. Options must match TEXT_COLORS in includes/departures.h (unknown -> white).
+  # Colour of the board, clock and status text and the line numbers (black on the light tram 8/13
+  # boxes stays black). The line boxes keep the VBZ colours and errors stay red.
+  # Options must match TEXT_COLORS in includes/departures.h (unknown -> white).
   # No on_value: the 1 s display interval picks the change up (same as Show clock).
   - platform: template
     id: text_color
