@@ -34,7 +34,13 @@ static constexpr int DEST_X = 27;
 static constexpr int DEST_MAX_W = 74;     // up to the time column (no low-floor icon any more)
 static constexpr int TIME_RIGHT_X = 123;  // original: cursor = 123 - advance
 static constexpr int TRAM_ICON_X = 116;   // original: 108 + 16 - 8
-static constexpr int TICK_X = 125;
+static constexpr int TICK_X = 124;        // tick ink at x 125..126: 1 px off the panel edge
+// Status messages: lines 12 px apart from y 1 (i/j/umlaut dots would touch y 0). Every glyph has a
+// 1 px left bearing, so ink starts at x 1. Wrapping at 125 px keeps it within x 126 even when a
+// line ends in N, y or ",", which stick out 1 px past their advance.
+static constexpr int MSG_TOP_Y = 1;
+static constexpr int MSG_LINE_H = 12;
+static constexpr int MSG_MAX_W = 125;
 static constexpr int LATE_MIN = 3;        // original lateMinCutoff
 static constexpr size_t MAX_KEEP = 15;
 
@@ -42,7 +48,24 @@ static const char *const TRAM_ICON = "\xEE\x80\x80";  // U+E000 in vbzfont.bdf
 static const char *const TICK_LIVE = "`";
 static const char *const TICK_SCHEDULED = "'";
 
-inline Color text_color() { return Color(255, 255, 255); }  // original "vbzYellow" is white
+// Text colours for the "Text color" select (board, clock and status text; not the line boxes).
+// Keep the names in sync with its options in zvv-schedule.yaml. No red: errors use it.
+struct TextColorPreset {
+  const char *name;
+  uint8_t r, g, b;
+};
+static constexpr TextColorPreset TEXT_COLORS[] = {
+    {"White", 255, 255, 255}, {"Amber", 255, 176, 0}, {"Yellow", 255, 255, 0},
+    {"Orange", 255, 100, 0},  {"Green", 0, 255, 0},   {"Cyan", 0, 255, 255},
+};
+
+// Unknown or empty name -> white (the original "vbzYellow" is white).
+inline Color text_color(const std::string &name) {
+  for (const auto &p : TEXT_COLORS)
+    if (name == p.name)
+      return Color(p.r, p.g, p.b);
+  return Color(255, 255, 255);
+}
 inline Color error_color() { return Color(255, 0, 0); }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +234,29 @@ inline std::string crop_to_width(Display &it, esphome::font::Font *font, std::st
   return s + ".";
 }
 
+// A word wider than max_w, split after '.', '/' or '-' so it can wrap: at the first such break
+// whose remainder fits ("transport.opendata.ch" -> "transport." + "opendata.ch"), otherwise as
+// late as still fits. Without any break it stays whole.
+inline std::vector<std::string> split_long_word(Display &it, esphome::font::Font *font, std::string word, int max_w) {
+  std::vector<std::string> parts;
+  while (text_width(it, font, word) > max_w) {
+    size_t cut = std::string::npos;
+    for (size_t i = 0; i + 1 < word.size(); i++) {
+      if ((word[i] != '.' && word[i] != '/' && word[i] != '-') || text_width(it, font, word.substr(0, i + 1)) > max_w)
+        continue;
+      cut = i + 1;
+      if (text_width(it, font, word.substr(cut)) <= max_w)
+        break;
+    }
+    if (cut == std::string::npos)
+      break;
+    parts.push_back(word.substr(0, cut));
+    word.erase(0, cut);
+  }
+  parts.push_back(word);
+  return parts;
+}
+
 // Greedy word wrap for status / error screens.
 inline std::vector<std::string> wrap_text(Display &it, esphome::font::Font *font, const std::string &text, int max_w) {
   std::vector<std::string> lines;
@@ -220,13 +266,16 @@ inline std::vector<std::string> wrap_text(Display &it, esphome::font::Font *font
     size_t end = text.find_first_of(" \n", pos);
     if (end == std::string::npos)
       end = text.size();
-    std::string word = text.substr(pos, end - pos);
-    std::string candidate = current.empty() ? word : current + " " + word;
-    if (!current.empty() && text_width(it, font, candidate) > max_w) {
-      lines.push_back(current);
-      current = word;
-    } else {
-      current = candidate;
+    const auto parts = split_long_word(it, font, text.substr(pos, end - pos), max_w);
+    for (size_t k = 0; k < parts.size(); k++) {
+      // The pieces of a split word join without a space.
+      std::string candidate = (current.empty() || k > 0) ? current + parts[k] : current + " " + parts[k];
+      if (!current.empty() && text_width(it, font, candidate) > max_w) {
+        lines.push_back(current);
+        current = parts[k];
+      } else {
+        current = candidate;
+      }
     }
     if (end < text.size() && text[end] == '\n') {
       lines.push_back(current);
@@ -534,7 +583,7 @@ inline std::string board_signature(const std::vector<Row> &rows, bool stale) {
   return sig;
 }
 
-inline void draw_board(Display &it, esphome::font::Font *font, const std::vector<Row> &rows, bool stale) {
+inline void draw_board(Display &it, esphome::font::Font *font, const std::vector<Row> &rows, bool stale, Color fg) {
   for (size_t i = 0; i < rows.size(); i++) {
     const Departure &d = *rows[i].dep;
     const int y = static_cast<int>(i) * ROW_PITCH;
@@ -545,16 +594,16 @@ inline void draw_board(Display &it, esphome::font::Font *font, const std::vector
 
     // Destination
     const std::string dest = crop_to_width(it, font, d.dest, DEST_MAX_W);
-    it.print(DEST_X, y, font, text_color(), TextAlign::TOP_LEFT, dest.c_str());
+    it.print(DEST_X, y, font, fg, TextAlign::TOP_LEFT, dest.c_str());
 
     // Time to departure
     if (rows[i].minutes <= 0) {
-      it.print(TRAM_ICON_X, y, font, text_color(), TextAlign::TOP_LEFT, TRAM_ICON);
+      it.print(TRAM_ICON_X, y, font, fg, TextAlign::TOP_LEFT, TRAM_ICON);
     } else {
       char buf[8];
       snprintf(buf, sizeof(buf), d.late() ? ">%d" : "%d", std::min(rows[i].minutes, 999));
-      it.print(TIME_RIGHT_X, y, font, text_color(), TextAlign::TOP_RIGHT, buf);
-      it.print(TICK_X, y, font, text_color(), TextAlign::TOP_LEFT, d.live ? TICK_LIVE : TICK_SCHEDULED);
+      it.print(TIME_RIGHT_X, y, font, fg, TextAlign::TOP_RIGHT, buf);
+      it.print(TICK_X, y, font, fg, TextAlign::TOP_LEFT, d.live ? TICK_LIVE : TICK_SCHEDULED);
     }
   }
   if (stale)  // data is old: small red marker in the bottom-right corner
@@ -563,27 +612,28 @@ inline void draw_board(Display &it, esphome::font::Font *font, const std::vector
 
 inline void draw_message(Display &it, esphome::font::Font *font, const std::string &text, Color color,
                          size_t max_lines = 5) {
-  const auto lines = wrap_text(it, font, font_safe(text), it.get_width());
+  const auto lines = wrap_text(it, font, font_safe(text), MSG_MAX_W);
   for (size_t i = 0; i < lines.size() && i < max_lines; i++)
-    it.print(0, static_cast<int>(i) * 12, font, color, TextAlign::TOP_LEFT, lines[i].c_str());
+    it.print(0, MSG_TOP_Y + static_cast<int>(i) * MSG_LINE_H, font, color, TextAlign::TOP_LEFT, lines[i].c_str());
 }
 
 // ---------------------------------------------------------------------------
 // Clock band ("Show clock" switch): replaces departure rows 4 and 5 (y 39..63).
 // Left: HH:MM in fonts/vbzfont-big.bdf (the VBZ digits scaled 2x, 12x18 px).
-// Right: weekday over "13 Nov 26" in the normal font, on the row 4 / row 5 grid,
-// right-aligned to the panel edge. The widest weekday ("Wednesday", 64 px) still
-// leaves a gap of a few pixels next to the time.
+// Right: weekday over "13 Nov 26" in the normal font, right-aligned 1 px off the panel
+// edge. Everything keeps 1 px clear of the left, right and bottom edges. The widest
+// weekday ("Wednesday", 64 px) leaves a 2 px gap next to the time.
 // ---------------------------------------------------------------------------
 static constexpr size_t CLOCK_DEPARTURE_ROWS = 3;   // departure / message lines kept above the band
-static constexpr int CLOCK_TIME_X = -2;             // the 2x digits have a 2 px left bearing: ink starts at x 0
-static constexpr int CLOCK_TIME_Y = 40;             // digits cover y 42..59, centred on the two text lines
-static constexpr int CLOCK_LINE1_Y = 3 * ROW_PITCH;  // 39, same as departure row 4
-static constexpr int CLOCK_LINE2_Y = 4 * ROW_PITCH;  // 52, same as departure row 5
-static constexpr int CLOCK_DATE_RIGHT_X = 128;       // TOP_RIGHT anchor: the last digit's ink ends at x 127
+static constexpr int CLOCK_TIME_X = -1;             // the 2x digits have a 2 px left bearing: ink starts at x 1
+static constexpr int CLOCK_TIME_Y = 40;             // digits cover y 42..59, centred on the text lines (y 40..60)
+static constexpr int CLOCK_LINE1_Y = 3 * ROW_PITCH;  // 39, same as departure row 4; "y" tails end at y 50
+// 1 px above departure row 5: the tails of "Sep", "Aug", "May", "Apr" end at y 62, not on the edge.
+static constexpr int CLOCK_LINE2_Y = 4 * ROW_PITCH - 1;  // 51
+static constexpr int CLOCK_DATE_RIGHT_X = 127;       // TOP_RIGHT anchor: the last digit's ink ends at x 126
 // Every English weekday ends in "y", whose tail sticks out 1 px past its advance. Anchoring 1 px
-// further left keeps it on the panel and flush with the date.
-static constexpr int CLOCK_WEEKDAY_RIGHT_X = 127;
+// further left lines it up with the date.
+static constexpr int CLOCK_WEEKDAY_RIGHT_X = 126;
 
 struct ClockInfo {
   int hour, minute;
@@ -615,19 +665,20 @@ inline std::string clock_date_str(const ClockInfo &c) {
 // Changes once a minute (the weekday follows from the date).
 inline std::string clock_signature(const ClockInfo &c) { return clock_time_str(c) + "|" + clock_date_str(c); }
 
-inline void draw_clock(Display &it, esphome::font::Font *big, esphome::font::Font *small, const ClockInfo &c) {
-  it.print(CLOCK_TIME_X, CLOCK_TIME_Y, big, text_color(), TextAlign::TOP_LEFT, clock_time_str(c).c_str());
-  it.print(CLOCK_WEEKDAY_RIGHT_X, CLOCK_LINE1_Y, small, text_color(), TextAlign::TOP_RIGHT, weekday_name(c.weekday));
-  it.print(CLOCK_DATE_RIGHT_X, CLOCK_LINE2_Y, small, text_color(), TextAlign::TOP_RIGHT, clock_date_str(c).c_str());
+inline void draw_clock(Display &it, esphome::font::Font *big, esphome::font::Font *small, const ClockInfo &c,
+                       Color fg) {
+  it.print(CLOCK_TIME_X, CLOCK_TIME_Y, big, fg, TextAlign::TOP_LEFT, clock_time_str(c).c_str());
+  it.print(CLOCK_WEEKDAY_RIGHT_X, CLOCK_LINE1_Y, small, fg, TextAlign::TOP_RIGHT, weekday_name(c.weekday));
+  it.print(CLOCK_DATE_RIGHT_X, CLOCK_LINE2_Y, small, fg, TextAlign::TOP_RIGHT, clock_date_str(c).c_str());
 }
 
-// Red square with a white Swiss cross (like the original 34x34 splash bitmap).
-inline void draw_splash(Display &it, esphome::font::Font *font) {
+// Red square with a white Swiss cross (like the original 34x34 splash bitmap), caption in fg.
+inline void draw_splash(Display &it, esphome::font::Font *font, Color fg) {
   const int s = 34, x0 = (128 - s) / 2, y0 = 2;
   it.filled_rectangle(x0, y0, s, s, Color(255, 0, 0));
   it.filled_rectangle(x0 + 14, y0 + 6, 6, 22, Color(255, 255, 255));
   it.filled_rectangle(x0 + 6, y0 + 14, 22, 6, Color(255, 255, 255));
-  it.print(64, 40, font, text_color(), TextAlign::TOP_CENTER, "opendata.ch");
+  it.print(64, 40, font, fg, TextAlign::TOP_CENTER, "opendata.ch");
 }
 
 // Colour bars + half markers to verify pin colour order and the E address line.

@@ -157,6 +157,8 @@ display:
       auto *wifi = wifi::global_wifi_component;
       const auto now = id(sntp_time).now();
       const auto &b = zvv::board();
+      const std::string color_name = id(text_color).current_option().str();
+      const Color fg = zvv::text_color(color_name);
 
       enum class Mode { TEST, SPLASH, AP, CONNECTING, ERROR, LOADING, EMPTY, BOARD } mode;
       std::vector<zvv::Row> rows;
@@ -191,6 +193,7 @@ display:
           sig += "|" + zvv::clock_signature(ci);  // redraws once a minute
         }
       }
+      sig += "|" + color_name;  // a new text colour redraws the frame
       const size_t msg_lines = clock ? zvv::CLOCK_DEPARTURE_ROWS : 5;
 
       if (sig == last_sig)
@@ -206,29 +209,29 @@ display:
           zvv::draw_test_pattern(c, font);
           break;
         case Mode::SPLASH:
-          zvv::draw_splash(c, font);
+          zvv::draw_splash(c, font, fg);
           break;
         case Mode::AP:
-          zvv::draw_message(c, font, "connect to:\n${name}\npwd: ${ap_password}\n192.168.4.1", Color(255, 255, 255));
+          zvv::draw_message(c, font, "connect to:\n${name}\npwd: ${ap_password}\n192.168.4.1", fg);
           break;
         case Mode::CONNECTING:
-          zvv::draw_message(c, font, "connecting...", Color(255, 255, 255));
+          zvv::draw_message(c, font, "connecting...", fg);
           break;
         case Mode::ERROR:
           zvv::draw_message(c, font, b.last_error, zvv::error_color(), msg_lines);
           break;
         case Mode::LOADING:
-          zvv::draw_message(c, font, "loading...\n" + id(ip_address).state, Color(255, 255, 255), msg_lines);
+          zvv::draw_message(c, font, "loading...\n" + id(ip_address).state, fg, msg_lines);
           break;
         case Mode::EMPTY:
-          zvv::draw_message(c, font, "keine Abfahrten", Color(255, 255, 255), msg_lines);
+          zvv::draw_message(c, font, "keine Abfahrten", fg, msg_lines);
           break;
         case Mode::BOARD:
-          zvv::draw_board(c, font, rows, stale);
+          zvv::draw_board(c, font, rows, stale, fg);
           break;
       }
       if (clock)
-        zvv::draw_clock(c, id(vbz_big), font, ci);
+        zvv::draw_clock(c, id(vbz_big), font, ci, fg);
       c.present(it);
 
 interval:
@@ -568,6 +571,25 @@ switch:
     optimistic: true
     restore_mode: ALWAYS_OFF
     entity_category: diagnostic
+
+select:
+  # Colour of the board, clock and status text. The line boxes keep the VBZ colours and errors
+  # stay red. Options must match TEXT_COLORS in includes/departures.h (unknown -> white).
+  # No on_value: the 1 s display interval picks the change up (same as Show clock).
+  - platform: template
+    id: text_color
+    name: Text color
+    icon: mdi:palette
+    optimistic: true
+    restore_value: true
+    initial_option: White
+    options:
+      - White
+      - Amber
+      - Yellow
+      - Orange
+      - Green
+      - Cyan
 
 datetime:
   - platform: template

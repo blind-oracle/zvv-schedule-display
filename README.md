@@ -99,6 +99,7 @@ If Wi-Fi can't connect, the device opens an access point called `zvv-schedule`. 
 | Brightness curve | Gamma of the curve: < 1 brightens faster in dim rooms, > 1 slower. |
 | Night schedule + Night start / Night end | Blanks the panel inside the window. The window may wrap past midnight. |
 | Show clock | Replaces the bottom two departure rows with the time, weekday and date. |
+| Text color | Colour of the destinations, minutes, clock and status text: White, Amber, Yellow, Orange, Green or Cyan. The line-number boxes keep the VBZ colours and errors stay red. |
 | Test pattern | Shows R/G/B bars and a "bottom half" marker to check the colour order and the E line. |
 | Illuminance, Display brightness | The measured lux (throttled to every 30 s) and the brightness actually applied. |
 | Last update, Last error, Heap free, Heap max block | Diagnostics. |
@@ -144,6 +145,7 @@ c++ -std=c++17 -I "$AJ" tools/host_preview.cpp -o /tmp/zvv-preview
 /tmp/zvv-preview --selftest fonts/vbzfont.bdf fonts/vbzfont-big.bdf   # unit checks + status and clock screens
 curl -s "$(/tmp/zvv-preview --url 8576193)" | /tmp/zvv-preview fonts/vbzfont.bdf "C,D"
 curl -s "$(/tmp/zvv-preview --url 8576193)" | /tmp/zvv-preview fonts/vbzfont.bdf "" --clock fonts/vbzfont-big.bdf
+curl -s "$(/tmp/zvv-preview --url 8576193)" | /tmp/zvv-preview fonts/vbzfont.bdf --color Amber   # non-white text prints as 'o'
 ```
 
 ## Credits and license

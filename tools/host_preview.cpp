@@ -9,6 +9,7 @@
 // Run:
 //   curl -s "$(/tmp/zvv-preview --url 8576193)" | /tmp/zvv-preview fonts/vbzfont.bdf [platform-filter]
 //   ... | /tmp/zvv-preview fonts/vbzfont.bdf [platform-filter] --via "Schlyfi" --clock fonts/vbzfont-big.bdf
+//   ... | /tmp/zvv-preview fonts/vbzfont.bdf --color Amber   (non-white text prints as 'o')
 //   /tmp/zvv-preview --selftest fonts/vbzfont.bdf [fonts/vbzfont-big.bdf]
 
 #include <ArduinoJson.h>
@@ -243,6 +244,27 @@ static void dump(const esphome::display::Display &d) {
   std::cout << '+' << std::string(128, '-') << "+\n";
 }
 
+// True if nothing is lit in the outermost column on the right, and (optionally) on the left and
+// in the top and bottom rows. Text keeps 1 px off the panel edges. Line boxes are allowed at x 0
+// (left = false), and the 5-row board's dots and tails at y 0 / 63 (top_bottom = false).
+static bool edges_clear(const esphome::display::Display &d, const char *what, bool left = true,
+                        bool top_bottom = true) {
+  using esphome::display::Display;
+  auto lit = [&](int x, int y) { return !(d.px[y][x] == esphome::Color::BLACK); };
+  std::string bad;
+  for (int y = 0; y < Display::H; y++) {
+    if (lit(Display::W - 1, y)) bad += " x127,y" + std::to_string(y);
+    if (left && lit(0, y)) bad += " x0,y" + std::to_string(y);
+  }
+  for (int x = 0; top_bottom && x < Display::W; x++) {
+    if (lit(x, 0)) bad += " y0,x" + std::to_string(x);
+    if (lit(x, Display::H - 1)) bad += " y63,x" + std::to_string(x);
+  }
+  if (!bad.empty())
+    std::cerr << what << ": lit on the panel edge:" << bad.substr(0, 120) << "\n";
+  return bad.empty();
+}
+
 static int selftest(esphome::display::Display &it, esphome::font::Font *font, esphome::font::Font *big) {
   using namespace zvv;
   struct Case {
@@ -294,9 +316,31 @@ static int selftest(esphome::display::Display &it, esphome::font::Font *font, es
   expect(in_window(23 * 60 + 30, 23 * 60, 6 * 60), "window wraps (late)");
   expect(in_window(5 * 60, 23 * 60, 6 * 60), "window wraps (early)");
   expect(!in_window(12 * 60, 23 * 60, 6 * 60), "outside wrapped window");
+  expect(text_color("White") == esphome::Color(255, 255, 255), "text colour White");
+  expect(text_color("Amber") == esphome::Color(255, 176, 0), "text colour Amber");
+  expect(text_color("") == esphome::Color(255, 255, 255), "no text colour -> white");
+  expect(text_color("bogus") == esphome::Color(255, 255, 255), "unknown text colour -> white");
+  for (const auto &a : TEXT_COLORS) {
+    int same = 0;
+    for (const auto &b : TEXT_COLORS)
+      same += std::string(a.name) == b.name;
+    expect(same == 1, "text colour names unique");
+    expect(!(text_color(a.name) == error_color()), "text colour differs from the error colour");
+  }
   expect(in_window(13 * 60, 12 * 60, 14 * 60), "plain window");
   expect(!in_window(14 * 60, 12 * 60, 14 * 60), "window end exclusive");
   expect(!in_window(600, 600, 600), "empty window");
+
+  expect(wrap_text(it, font, "No connection to transport.opendata.ch", MSG_MAX_W) ==
+             std::vector<std::string>({"No connection to", "transport.", "opendata.ch"}),
+         "overlong word wraps after a dot");
+  expect(wrap_text(it, font, "a b\nc", MSG_MAX_W) == std::vector<std::string>({"a b", "c"}), "plain wrap unchanged");
+
+  // Message wrapping: lines ending in N / y (1 px past their advance) and dots on the first line.
+  it.fill(esphome::Color::BLACK);
+  draw_message(it, font, "jiy NNNN yyyy NNNN yyyy NNNN yyyy NNNN yyyy NNNN yyyy NNNN yyyy NNNN yyyy NNNN",
+               text_color("White"));
+  expect(edges_clear(it, "wrapped message"), "wrapped message clear of all edges");
 
   // Direction: Via stop filter and the Directions summary.
   expect(fold("ZÜRICH, Äsch É") == "zürich, äsch é", "fold ASCII + umlauts");
@@ -357,6 +401,16 @@ static int selftest(esphome::display::Display &it, esphome::font::Font *font, es
     expect_dests("A", "", "Bahnhofplatz/HB");
     expect_dests("A", "Schlyfi", "");
     expect_dests("", " , ", "Hermetschloo,Kienastenwies,Bahnhofplatz/HB,Herdernstrasse");
+
+    // Ticks and minutes keep off the right edge (line boxes sit at x 0 on purpose).
+    // First departure 30 s away (tram icon), second live (thick tick), third delayed (">N").
+    run("", "");
+    board().departures[1].live = true;
+    board().departures[2].live = true;
+    board().departures[2].delay_min = 5;
+    it.fill(esphome::Color::BLACK);
+    draw_board(it, font, visible_rows(t0 + 270), false, text_color("White"));
+    expect(edges_clear(it, "board", false, false), "board clear of the right edge");
   }
   {
     std::vector<DirectionGroup> many;
@@ -393,24 +447,30 @@ static int selftest(esphome::display::Display &it, esphome::font::Font *font, es
     int time_right = 0;  // widest possible time
     for (const char *t : {"00:00", "08:08", "23:58"})
       time_right = std::max(time_right, ink(big, t, CLOCK_TIME_X, TextAlign::TOP_LEFT).second);
-    expect(ink(big, "08:08", CLOCK_TIME_X, TextAlign::TOP_LEFT).first == 0, "time flush with x 0");
+    expect(ink(big, "08:08", CLOCK_TIME_X, TextAlign::TOP_LEFT).first == 1, "time starts 1 px off the left edge");
     for (int m = 1; m <= 12; m++) {
       const std::string s = clock_date_str({0, 0, 0, 28, m, 2026});
       const auto date = ink(font, s.c_str(), CLOCK_DATE_RIGHT_X, TextAlign::TOP_RIGHT);
-      if (date.first < time_right + 3 || date.second != 128) {
+      if (date.first < time_right + 2 || date.second != 127) {
         std::cerr << s << ": ink x " << date.first << ".." << date.second - 1 << ", time ends at x "
-                  << time_right - 1 << " (need a 3 px gap and ink flush with x 127)\n";
+                  << time_right - 1 << " (need a 2 px gap and ink ending at x 126)\n";
         fails++;
       }
     }
     for (int d = 0; d < 7; d++) {
       const auto wd = ink(font, weekday_name(d), CLOCK_WEEKDAY_RIGHT_X, TextAlign::TOP_RIGHT);
-      if (wd.first < time_right + 3 || wd.second != 128) {
+      if (wd.first < time_right + 2 || wd.second != 127) {
         std::cerr << weekday_name(d) << ": ink x " << wd.first << ".." << wd.second - 1 << ", time ends at x "
-                  << time_right - 1 << " (need a 3 px gap and ink flush with x 127)\n";
+                  << time_right - 1 << " (need a 2 px gap and ink ending at x 126)\n";
         fails++;
       }
     }
+    // Widest weekday over a date with a "p" tail, under three message lines with dots on top.
+    it.fill(esphome::Color::BLACK);
+    draw_message(it, font, "jiy NNNN yyyy NNNN yyyy NNNN yyyy NNNN yyyy NNNN", text_color("White"),
+                 CLOCK_DEPARTURE_ROWS);
+    draw_clock(it, big, font, {23, 58, 3, 28, 9, 2026}, text_color("White"));
+    expect(edges_clear(it, "clock + message"), "clock and message clear of all edges");
   }
   std::cout << (fails ? "selftest FAILED" : "selftest OK") << " (" << fails << " failures)\n";
   return fails ? 1 : 0;
@@ -428,38 +488,51 @@ int main(int argc, char **argv) {
       big = std::make_unique<esphome::font::Font>(argv[3]);
     esphome::display::Display it;
     int rc = selftest(it, &font, big.get());
-    // Render the static screens too.
+    // Render the static screens too; none of them may touch a panel edge.
+    int edge_fails = 0;
     it.fill(esphome::Color::BLACK);
-    zvv::draw_splash(it, &font);
+    const esphome::Color white = zvv::text_color("White");
+    zvv::draw_splash(it, &font, white);
     dump(it);
+    edge_fails += !edges_clear(it, "splash");
     it.fill(esphome::Color::BLACK);
-    zvv::draw_message(it, &font, "connect to:\nzvv-schedule\npwd: zvv-setup\n192.168.4.1", esphome::Color(255, 255, 255));
+    zvv::draw_message(it, &font, "connect to:\nzvv-schedule\npwd: zvv-setup\n192.168.4.1", white);
     dump(it);
+    edge_fails += !edges_clear(it, "AP message");
     it.fill(esphome::Color::BLACK);
     zvv::draw_message(it, &font, "No connection to transport.opendata.ch", zvv::error_color());
     dump(it);
+    edge_fails += !edges_clear(it, "error message");
     if (big) {
       it.fill(esphome::Color::BLACK);
-      zvv::draw_message(it, &font, "keine Abfahrten", esphome::Color(255, 255, 255), zvv::CLOCK_DEPARTURE_ROWS);
-      zvv::draw_clock(it, big.get(), &font, {9, 5, 3, 11, 11, 2026});
+      zvv::draw_message(it, &font, "keine Abfahrten", white, zvv::CLOCK_DEPARTURE_ROWS);
+      zvv::draw_clock(it, big.get(), &font, {9, 5, 3, 11, 11, 2026}, white);
       dump(it);
+      edge_fails += !edges_clear(it, "clock screen");
+    }
+    if (edge_fails) {
+      std::cout << "edge check FAILED on " << edge_fails << " screen(s)\n";
+      rc = 1;
     }
     return rc || font.missing || (big && big->missing);
   }
   std::vector<std::string> args;
   std::unique_ptr<esphome::font::Font> big;  // --clock: draw the clock band like the "Show clock" switch
   std::string via;                           // --via: like the "Via stop" text entity
+  std::string color = "White";               // --color: like the "Text color" select
   for (int i = 1; i < argc; i++) {
     if (std::string(argv[i]) == "--clock" && i + 1 < argc)
       big = std::make_unique<esphome::font::Font>(argv[++i]);
     else if (std::string(argv[i]) == "--via" && i + 1 < argc)
       via = argv[++i];
+    else if (std::string(argv[i]) == "--color" && i + 1 < argc)
+      color = argv[++i];
     else
       args.push_back(argv[i]);
   }
   if (args.empty()) {
     std::cerr << "usage: zvv-preview <vbzfont.bdf> [platform-filter] [--via <stops>] [--clock <vbzfont-big.bdf>]"
-                 " < stationboard.json\n";
+                 " [--color <name>] < stationboard.json\n";
     return 1;
   }
   esphome::font::Font font(args[0]);
@@ -484,15 +557,17 @@ int main(int argc, char **argv) {
   esphome::display::Display it;
   it.fill(esphome::Color::BLACK);
   const auto rows = zvv::visible_rows(now, big ? zvv::CLOCK_DEPARTURE_ROWS : zvv::MAX_ROWS);
-  zvv::draw_board(it, &font, rows, false);
+  const esphome::Color fg = zvv::text_color(color);
+  zvv::draw_board(it, &font, rows, false, fg);
   std::string sig = zvv::board_signature(rows, false);
   if (big) {
     const std::time_t t = now;
     const std::tm *lt = std::localtime(&t);
     const zvv::ClockInfo ci{lt->tm_hour, lt->tm_min, lt->tm_wday, lt->tm_mday, lt->tm_mon + 1, lt->tm_year + 1900};
-    zvv::draw_clock(it, big.get(), &font, ci);
+    zvv::draw_clock(it, big.get(), &font, ci, fg);
     sig += "|" + zvv::clock_signature(ci);
   }
+  sig += "|" + color;
   dump(it);
   std::cout << "signature: " << sig << "\n";
   return (font.missing || (big && big->missing)) ? 2 : 0;
